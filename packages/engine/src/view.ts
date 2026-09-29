@@ -37,6 +37,11 @@ export interface PlayerView {
 
 export function toPlayerView(state: GameState, seat: Seat, events: GameEvent[] = []): PlayerView {
   const other = (1 - seat) as Seat;
+  // 对家的暗杠牌面不外发（结算才亮）：用占位牌替换，客户端按 id<0 渲染背牌
+  const revealAll = state.phase === 'settlement';
+  const melds = state.melds.map(
+    (list, s) => (s === seat || revealAll) ? list : list.map((m) => m.concealed ? { ...m, tiles: m.tiles.map(() => HIDDEN_TILE) } : m),
+  ) as [Meld[], Meld[]];
   return {
     you: seat,
     seq: state.seq,
@@ -45,7 +50,7 @@ export function toPlayerView(state: GameState, seat: Seat, events: GameEvent[] =
     banker: state.banker,
     turn: state.turn,
     flowers: state.flowers,
-    melds: state.melds,
+    melds,
     rivers: state.rivers,
     hand: state.hands[seat],
     otherHandCount: state.hands[other].length,
@@ -61,3 +66,6 @@ export function toPlayerView(state: GameState, seat: Seat, events: GameEvent[] =
     events,
   };
 }
+
+/** 视图占位牌：id<0，客户端渲染为背牌 */
+const HIDDEN_TILE: Tile = { id: -1, suit: 'tong', rank: 1 };

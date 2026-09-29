@@ -93,6 +93,36 @@ describe('Room 房间与座位绑定', () => {
     }
   });
 
+  it('被顶掉的座位连接收到 room:kicked，座位绑定让位给新连接', () => {
+    const { room, sent } = mkRoom();
+    room.bind('s0', 0, room.tokens[0]);
+    room.bind('s1a', 1, room.tokens[1]);
+    room.bind('s1b', 1, room.tokens[1]); // 同 token 二次绑定 = 顶掉旧连接
+    expect(room.sids[1]).toBe('s1b');
+    expect(sent.some((s) => s.event === 'room:kicked')).toBe(true);
+  });
+
+  it('无人在线时牌局冻结，有人回来即恢复托管', () => {
+    vi.useFakeTimers();
+    try {
+      const { room } = mkRoom(5_000);
+      room.bind('s0', 0, room.tokens[0]);
+      room.bind('s1', 1, room.tokens[1]);
+      vi.advanceTimersByTime(5_100); // 托管定花
+      const seq = room.state.seq;
+      expect(seq).toBeGreaterThan(0);
+      room.unbind('s0');
+      room.unbind('s1');
+      vi.advanceTimersByTime(60_000);
+      expect(room.state.seq).toBe(seq); // 冻结：不推进
+      room.bind('s0', 0, room.tokens[0]); // 一人回来即恢复（对家按掉线 4s 托管）
+      vi.advanceTimersByTime(4_100);
+      expect(room.state.seq).toBeGreaterThan(seq);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('空房间按 TTL 清理', () => {
     const manager = new RoomManager();
     const room = manager.create(() => {}, { rngFactory: () => mulberry32(1) });

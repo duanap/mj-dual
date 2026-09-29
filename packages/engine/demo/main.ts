@@ -115,6 +115,10 @@ function connectOnline(): Socket {
     flash(p.connected ? '对手已上线' : '对手掉线，自动托管中');
     render();
   });
+  socket.on('room:kicked', () => {
+    flash('对局已在其他页面打开，本页返回人机模式');
+    goLocal();
+  });
   socket.on('disconnect', () => {
     if (online) {
       flash('连接断开，正在重连…');

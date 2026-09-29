@@ -69,6 +69,10 @@ export function attachGateway(io: Server, manager: RoomManager, opts: RoomOption
     socket.on('action', (raw: unknown, ack: Ack) => {
       if (typeof ack !== 'function') return;
       if (!session) return ack({ ok: false, code: 'NO_ROOM', message: '尚未加入房间' });
+      // 座位可能已被新连接顶掉：只有当前绑定者可以操作
+      if (session.room.sids[session.seat] !== socket.id) {
+        return ack({ ok: false, code: 'STALE_SESSION', message: '会话已在其他页面打开' });
+      }
       ack(session.room.action(session.seat, raw));
     });
 

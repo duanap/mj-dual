@@ -101,10 +101,12 @@ export class Room {
     return toPlayerView(this.state, seat, this.lastEvents);
   }
 
-  /** 连接绑定到座位；token 校验失败返回 null */
+  /** 连接绑定到座位；token 校验失败返回 null。顶掉旧连接时先通知它。 */
   bind(sid: string, seat: Seat, token: string): boolean {
     if (this.tokens[seat] !== token) return false;
     if (seat === 1) this.seat1Issued = true; // 出示过 token 即视为已发放
+    const prev = this.sids[seat];
+    if (prev != null && prev !== sid) this.send(seat, 'room:kicked', {});
     this.sids[seat] = sid;
     this.afterMembershipChange();
     return true;
@@ -161,6 +163,7 @@ export class Room {
     for (const seat of [0, 1] as const) {
       if (this.sids[seat] != null) this.send(seat, 'state', this.view(seat));
     }
+    this.lastEvents = []; // 事件只随首次推送携带，成员变动等后续推送不再重发（防客户端日志/音效重复）
   }
 
   /** 客户端意图：座位一律服务端盖章；合法性先于引擎校验 */
@@ -191,6 +194,7 @@ export class Room {
   private armAuto(): void {
     if (this.timer) clearTimeout(this.timer);
     if (!this.started) return; // 未满员不计时，等双方到齐才开始对局
+    if (this.isEmpty()) return; // 无人在线时冻结牌局，任意一方重连即自动恢复
     const anyDisconnected = !this.connected(0) || !this.connected(1);
     const delay = anyDisconnected ? DISCONNECT_AUTO_MS : this.autoMs;
     this.timer = setTimeout(() => this.autoStep(), delay);
