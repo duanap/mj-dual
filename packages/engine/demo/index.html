@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>两人两杠起胡麻将 · 引擎热座演示</title>
+<style>
+  :root { font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  body { margin: 0; background: #f4f1ea; color: #222; }
+  #app { max-width: 1020px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 12.5px; margin: 0 0 12px; }
+  header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .badge { background: #fff; border: 1px solid #d8d2c4; border-radius: 999px; padding: 4px 12px; font-size: 13px; }
+  header button { margin-left: auto; }
+  .players { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .player { background: #fff; border: 1px solid #d8d2c4; border-radius: 10px; padding: 10px 12px; }
+  .player.active { outline: 2px solid #b8860b; }
+  .player h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  .row { margin: 6px 0; font-size: 13px; min-height: 22px; }
+  .dim { color: #888; }
+  .tile { display: inline-block; border: 1px solid #c9c2b2; border-radius: 4px; background: #fffdf7; padding: 2px 6px; margin: 1px 2px; font-size: 13px; }
+  button.tile { cursor: pointer; font-size: 13px; }
+  button.tile:hover { background: #f0e9d8; }
+  .tile.tong { color: #1a5fb4; }
+  .tile.tiao { color: #1f7a33; }
+  .tile.drawn { outline: 2px solid #e0851b; }
+  .tile.small { font-size: 12px; padding: 1px 4px; }
+  .meld { border: 1px dashed #b8ad93; border-radius: 4px; padding: 2px 6px; margin-right: 4px; font-size: 12px; }
+  #actions { margin: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; min-height: 34px; align-items: center; }
+  button.action { font-size: 14px; padding: 6px 14px; border-radius: 6px; border: 1px solid #8a6d1a; background: #f5c542; cursor: pointer; }
+  button.action:hover { background: #eec02f; }
+  #new { font-size: 13px; padding: 4px 12px; border-radius: 6px; border: 1px solid #666; background: #fff; cursor: pointer; }
+  #result { background: #fff8e6; border: 1px solid #e3c56b; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
+  #log { background: #fff; border: 1px solid #d8d2c4; border-radius: 8px; padding: 8px 12px; max-height: 220px; overflow-y: auto; font-size: 12.5px; line-height: 1.7; }
+  #flash { color: #b3261e; min-height: 20px; font-size: 13px; margin-top: 8px; }
+  @media (max-width: 720px) { .players { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="./dist/main.js"></script>
+</body>
+</html>
