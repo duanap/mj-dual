@@ -1,5 +1,6 @@
 // 两人两杠起胡麻将 · 人机对战（本地单机版）
 // 视角：你=座位0（只看得到自己的牌），AI=座位1；规则全部由 packages/engine 纯函数引擎校验。
+// 布局：桌面纵向牌桌；手机横屏走紧凑布局（CSS 媒体查询），竖屏提示旋转。
 import type { Action, GameEvent, GameState, RNG, Seat, Tile } from '../src/index';
 import { applyAction, availableActions, currentActors, newMatch } from '../src/index';
 import { aiChooseAction } from './ai';
@@ -26,11 +27,16 @@ let state: GameState = newMatch(rng);
 let gen = 0; // 新对局代数：作废尚未触发的 AI 定时器
 let history: string[] = [];
 let lastDiscard: Tile | null = null;
+let lastRound = -1;
 let pendingActions: { seat: Seat; a: Action }[] = [];
 
 const SUIT_TEXT = { tong: '筒', tiao: '条' } as const;
 const seatName = (s: Seat): string => (s === HUMAN ? '你' : '对手');
-const flowerText = (s: Seat): string => (state.flowers[s] ? SUIT_TEXT[state.flowers[s]!] : '—');
+
+function flowerChip(s: Seat): string {
+  const f = state.flowers[s];
+  return f ? `<i class="fchip ${f}">${SUIT_TEXT[f]}</i>` : '<i class="fchip none">?</i>';
+}
 
 function fmtEvent(e: GameEvent): string {
   switch (e.type) {
@@ -120,7 +126,7 @@ function newGame(): void {
 
 /* ---------------- 渲染 ---------------- */
 
-function handHTML(seat: Seat): string {
+function handHTML(seat: Seat, dealing: boolean): string {
   const hand = state.hands[seat];
   if (seat === AI) {
     const reveal = state.phase === 'settlement';
@@ -128,11 +134,12 @@ function handHTML(seat: Seat): string {
   }
   const canPlay = state.phase === 'act' && state.turn === HUMAN;
   return hand
-    .map((t) => {
+    .map((t, i) => {
       const cls = 't-lg' + (state.drawnTile?.id === t.id ? ' drawn' : '');
+      const delay = dealing ? ` style="animation-delay:${i * 35}ms"` : '';
       return canPlay
-        ? `<button class="tbtn" data-discard="${t.id}" title="打出">${tileFaceHTML(t, cls)}</button>`
-        : tileFaceHTML(t, cls);
+        ? `<button class="tbtn"${delay} data-discard="${t.id}" title="打出">${tileFaceHTML(t, cls)}</button>`
+        : `<span class="twrap"${delay}>${tileFaceHTML(t, cls)}</span>`;
     })
     .join('');
 }
@@ -186,21 +193,23 @@ function phaseHint(): string {
 function overlayHTML(): string {
   if (state.phase !== 'settlement' || !state.result) return '';
   const r = state.result;
-  const title = r.winner == null ? '流 局' : `${seatName(r.winner)}胡了！`;
+  const title = r.winner == null
+    ? '流 局'
+    : `${r.winner === HUMAN ? '🎉' : '💦'} ${seatName(r.winner)}胡了！`;
   const sub = r.winner == null
     ? r.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
     : `${r.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${r.tile ? tileText(r.tile) : ''}`;
   const hands = ([HUMAN, AI] as Seat[])
     .map(
       (s) =>
-        `<div class="rev"><b>${seatName(s)}（${flowerText(s)}）</b>${state.hands[s].map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`,
+        `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`,
     )
     .join('');
   return `<div class="overlay"><div class="card">
     <h2>${title}</h2>
     <p>${sub}</p>
     ${hands}
-    <p class="tally">战绩 —— 你 ${state.tally.wins[HUMAN]} 胜 · 对手 ${state.tally.wins[AI]} 胜 · 流局 ${state.tally.draws}</p>
+    <p class="tally">战绩 —— 你 <b>${state.tally.wins[HUMAN]}</b> 胜 · 对手 <b>${state.tally.wins[AI]}</b> 胜 · 流局 ${state.tally.draws}</p>
     <button id="next" class="abtn hu">下一局</button>
   </div></div>`;
 }
@@ -216,38 +225,43 @@ function render(): void {
     }
   }
 
+  const dealing = state.round !== lastRound;
+  lastRound = state.round;
+
   const app = document.getElementById('app')!;
   app.innerHTML = `
     <header class="topbar">
       <span class="stat">第 ${state.round} 局</span>
-      <span class="stat">庄：${seatName(state.banker)}</span>
-      <span class="stat">牌墙 ${state.wall.length}</span>
-      <span class="stat">${state.tally.wins[HUMAN]}胜 ${state.tally.wins[AI]}负 ${state.tally.draws}流</span>
+      <span class="stat">庄 ${seatName(state.banker)}</span>
+      <span class="stat score">${state.tally.wins[HUMAN]}胜${state.tally.wins[AI]}负${state.tally.draws}流</span>
       <span class="spacer"></span>
-      <button id="logbtn" class="ghost">记录</button>
-      <button id="soundbtn" class="ghost">${isMuted() ? '🔇' : '🔊'}</button>
-      <button id="newbtn" class="ghost">新对局</button>
+      <button id="logbtn" class="ghost" title="对局记录">☰</button>
+      <button id="soundbtn" class="ghost" title="音效">${isMuted() ? '🔇' : '🔊'}</button>
+      <button id="newbtn" class="ghost" title="新对局">↻</button>
     </header>
     <main class="table">
       <section class="zone opp${currentActors(state).includes(AI) ? ' turn' : ''}">
         <div class="meta">
-          <span class="plate">对手（${flowerText(AI)}）${state.banker === AI ? ' · 庄' : ''}</span>
+          <span class="plate"><b class="pdot"></b>对手 ${flowerChip(AI)}${state.banker === AI ? '<em>庄</em>' : ''}</span>
           <span class="melds">${meldsHTML(AI)}</span>
         </div>
-        <div class="river">${riverHTML(AI)}</div>
-        <div class="backs">${handHTML(AI)}</div>
+        <div class="tray"><div class="river">${riverHTML(AI)}</div></div>
+        <div class="backs">${handHTML(AI, false)}</div>
       </section>
       <section class="center">
-        <span class="hint">${phaseHint()}</span>
-        ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
+        <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
+        <div class="mid">
+          <span class="hint">${phaseHint()}</span>
+          ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
+        </div>
       </section>
       <section class="zone me${currentActors(state).includes(HUMAN) ? ' turn' : ''}">
-        <div class="river">${riverHTML(HUMAN)}</div>
+        <div class="tray"><div class="river">${riverHTML(HUMAN)}</div></div>
         <div class="meta">
-          <span class="plate">你（${flowerText(HUMAN)}）${state.banker === HUMAN ? ' · 庄' : ''}</span>
+          <span class="plate"><b class="pdot"></b>你 ${flowerChip(HUMAN)}${state.banker === HUMAN ? '<em>庄</em>' : ''}</span>
           <span class="melds">${meldsHTML(HUMAN)}</span>
         </div>
-        <div class="hand">${handHTML(HUMAN)}</div>
+        <div class="hand${dealing ? ' dealing' : ''}">${handHTML(HUMAN, dealing)}</div>
       </section>
     </main>
     <footer class="actionbar">${abtns}</footer>
