@@ -10,6 +10,7 @@
   },
   "scripts": {
     "test": "npm test --workspaces --if-present",
-    "sim": "npm run sim --workspace @mj/engine"
+    "sim": "npm run sim --workspace @mj/engine",
+    "demo": "npm run demo --workspace @mj/engine"
   }
 }
