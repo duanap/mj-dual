@@ -11,3 +11,5 @@ export * from './claims';
 export * from './validator';
 export * from './settlement';
 export * from './engine';
+export * from './suggest';
+export * from './view';

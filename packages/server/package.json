@@ -1,18 +1,17 @@
 {
-  "name": "@mj/engine",
+  "name": "@mj/server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "exports": {
-    ".": "./src/index.ts",
-    "./rng.node": "./src/rng.node.ts"
-  },
   "scripts": {
+    "start": "tsx src/index.ts",
     "test": "vitest run",
-    "sim": "tsx src/sim.ts",
-    "typecheck": "tsc --noEmit",
-    "demo": "esbuild demo/main.ts --bundle --format=esm --outfile=demo/dist/main.js && node demo/server.mjs"
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mj/engine": "*",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

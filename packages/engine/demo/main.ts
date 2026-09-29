@@ -1,14 +1,11 @@
-// 两人两杠起胡麻将 · 人机对战（本地单机版）
-// 视角：你=座位0（只看得到自己的牌），AI=座位1；规则全部由 packages/engine 纯函数引擎校验。
-// 布局：桌面纵向牌桌；手机横屏走紧凑布局（CSS 媒体查询），竖屏提示旋转。
-import type { Action, GameEvent, GameState, RNG, Seat, Tile } from '../src/index';
-import { applyAction, availableActions, currentActors, newMatch } from '../src/index';
-import { aiChooseAction } from './ai';
+// 两人两杠起胡麻将 · 人机对战（本地） + 联机对战（@mj/server）
+// 规则全部由 packages/engine 纯函数引擎校验。联机遵循架构文档：客户端只发意图，
+// 座位由服务端分配，状态由服务端按玩家视角过滤后下发（PlayerView）。
+import { io, type Socket } from 'socket.io-client';
+import type { Action, GameEvent, GameState, PlayerView, RNG, Seat, Tile } from '../src/index';
+import { applyAction, availableActions, currentActors, newMatch, suggestAction } from '../src/index';
 import { backHTML, tileFaceHTML, tileText } from './tiles';
 import { isMuted, setMuted, sfx } from './audio';
-
-const HUMAN: Seat = 0;
-const AI: Seat = 1;
 
 // 浏览器 CSPRNG：crypto.getRandomValues + 拒绝采样（与生产随机源纪律一致）
 const rng: RNG = {
@@ -24,19 +21,222 @@ const rng: RNG = {
 };
 
 let state: GameState = newMatch(rng);
-let gen = 0; // 新对局代数：作废尚未触发的 AI 定时器
+let me: Seat = 0;
+let opp: Seat = 1;
+let gen = 0; // 本地 AI 定时器代数
 let history: string[] = [];
 let lastDiscard: Tile | null = null;
 let lastRound = -1;
-let pendingActions: { seat: Seat; a: Action }[] = [];
+let flashMsg = '';
+let menuOpen = false; // 联机菜单（暂停本地对局）
+let yourActions: Action[] = [];
+
+interface Online {
+  socket: Socket;
+  code: string;
+  token: string;
+}
+let online: Online | null = null;
+let view: PlayerView | null = null;
 
 const SUIT_TEXT = { tong: '筒', tiao: '条' } as const;
-const seatName = (s: Seat): string => (s === HUMAN ? '你' : '对手');
-
-function flowerChip(s: Seat): string {
+const seatName = (s: Seat): string => (s === me ? '你' : '对手');
+const flowerChip = (s: Seat): string => {
   const f = state.flowers[s];
   return f ? `<i class="fchip ${f}">${SUIT_TEXT[f]}</i>` : '<i class="fchip none">?</i>';
+};
+
+/* ---------------- 模式：本地 AI / 联机 ---------------- */
+
+function goLocal(): void {
+  if (online) {
+    online.socket.disconnect();
+    online = null;
+  }
+  view = null;
+  sessionStorage.removeItem('mj-room');
+  me = 0;
+  opp = 1;
+  gen++;
+  state = newMatch(rng);
+  history = [];
+  lastDiscard = null;
+  lastRound = -1;
+  render();
+  scheduleNext();
 }
+
+function viewToState(v: PlayerView): GameState {
+  const other = (1 - v.you) as Seat;
+  const ph = (i: number): Tile => ({ id: -10000 - i, suit: 'tong', rank: 1 });
+  const otherHand = v.reveal ? v.reveal[other] : Array.from({ length: v.otherHandCount }, (_, i) => ph(i));
+  return {
+    round: v.round,
+    phase: v.phase,
+    banker: v.banker,
+    turn: v.turn,
+    flowers: v.flowers,
+    hands: v.you === 0 ? [v.hand, otherHand] : [otherHand, v.hand],
+    melds: v.melds,
+    rivers: v.rivers,
+    wall: Array.from({ length: v.wallCount }, (_, i) => ph(100 + i)),
+    drawnTile: v.drawnTile,
+    claimable: false,
+    pending: v.pending,
+    passTiles: v.you === 0 ? [v.passTiles, []] : [[], v.passTiles],
+    ready: v.ready,
+    result: v.result,
+    tally: v.tally,
+    seq: v.seq,
+  };
+}
+
+function consumeEvents(events: GameEvent[]): void {
+  for (const e of events) {
+    history.unshift(fmtEvent(e));
+    sfxFor(e);
+  }
+  if (history.length > 120) history.length = 120;
+}
+
+function onState(v: PlayerView): void {
+  view = v;
+  me = v.you;
+  opp = (1 - v.you) as Seat;
+  consumeEvents(v.events);
+  state = viewToState(v);
+  render();
+}
+
+function connectOnline(): Socket {
+  const socket = io({ reconnectionAttempts: 5, transports: ['websocket', 'polling'] });
+  socket.on('state', onState);
+  socket.on('room:peer', (p: { seat: Seat; connected: boolean }) => {
+    flash(p.connected ? '对手已上线' : '对手掉线，自动托管中');
+    render();
+  });
+  socket.on('disconnect', () => {
+    if (online) {
+      flash('连接断开，正在重连…');
+      render();
+    }
+  });
+  socket.on('connect_error', () => {
+    if (!online && !menuOpen) {
+      flash('联机服务不可用（请确认服务端已启动：npm run server）');
+      render();
+    }
+  });
+  return socket;
+}
+
+function applyJoined(socket: Socket, res: any): void {
+  if (res.error) {
+    sessionStorage.removeItem('mj-room');
+    flash(`加入失败：${res.error}`);
+    menuOpen = true;
+    render();
+    return;
+  }
+  menuOpen = false;
+  gen++; // 停掉本地 AI
+  online = { socket, code: res.code, token: res.token };
+  sessionStorage.setItem('mj-room', JSON.stringify({ code: res.code, token: res.token }));
+  onState(res.view);
+}
+
+function createRoom(): void {
+  const socket = connectOnline();
+  flash('正在创建房间…');
+  render();
+  socket.once('connect', () => {
+    socket.emit('room:create', (res: any) => applyJoined(socket, res));
+  });
+}
+
+function joinRoom(code: string): void {
+  const socket = connectOnline();
+  flash('正在加入房间…');
+  render();
+  socket.once('connect', () => {
+    socket.emit('room:join', { code }, (res: any) => applyJoined(socket, res));
+  });
+}
+
+function rejoin(code: string, token: string): void {
+  const socket = connectOnline();
+  socket.once('connect', () => {
+    socket.emit('room:rejoin', { code, token }, (res: any) => applyJoined(socket, res));
+  });
+}
+
+// 页面加载：有保存的房间则自动重连
+try {
+  const saved = sessionStorage.getItem('mj-room');
+  if (saved) {
+    const { code, token } = JSON.parse(saved) as { code: string; token: string };
+    rejoin(code, token);
+  }
+} catch {
+  sessionStorage.removeItem('mj-room');
+}
+
+/* ---------------- 行为 ---------------- */
+
+function doAction(a: Action): void {
+  if (online) {
+    online.socket.emit('action', a, (res: any) => {
+      if (res && res.ok === false) flash(res.message ?? '操作被拒绝');
+    });
+    return;
+  }
+  applyLocal(a);
+}
+
+function applyLocal(a: Action): void {
+  try {
+    const res = applyAction(state, a, rng);
+    state = res.state;
+    consumeEvents(res.events);
+    flash('');
+  } catch (err) {
+    flash(err instanceof Error ? err.message : String(err));
+  }
+  render();
+  scheduleNext();
+}
+
+function scheduleNext(): void {
+  if (online || menuOpen) return; // 联机由服务端驱动；菜单打开时暂停本地对局
+  const myGen = gen;
+  if (state.phase === 'settlement') {
+    if (currentActors(state).includes(opp)) {
+      setTimeout(() => {
+        if (myGen === gen && state.phase === 'settlement') applyLocal({ type: 'ready', seat: opp });
+      }, 1100);
+    }
+    return;
+  }
+  if (currentActors(state).includes(opp)) {
+    setTimeout(() => {
+      if (myGen !== gen || menuOpen) return;
+      applyLocal(suggestAction(state, opp, rng));
+    }, state.phase === 'respond' ? 950 : 720);
+  }
+}
+
+function newGame(): void {
+  if (online) return;
+  gen++;
+  state = newMatch(rng);
+  history = [];
+  lastDiscard = null;
+  lastRound = -1;
+  render();
+  scheduleNext();
+}
+
+/* ---------------- 事件文本 / 音效 ---------------- */
 
 function fmtEvent(e: GameEvent): string {
   switch (e.type) {
@@ -81,63 +281,24 @@ function sfxFor(e: GameEvent): void {
   }
 }
 
-function apply(a: Action): void {
-  try {
-    const res = applyAction(state, a, rng);
-    state = res.state;
-    for (const e of res.events) {
-      history.unshift(fmtEvent(e));
-      sfxFor(e);
-    }
-    if (history.length > 120) history.length = 120;
-  } catch (err) {
-    console.error('非法操作（不应发生）', err);
-  }
-  render();
-  scheduleNext();
-}
-
-function scheduleNext(): void {
-  const myGen = gen;
-  if (state.phase === 'settlement') {
-    if (currentActors(state).includes(AI)) {
-      setTimeout(() => {
-        if (myGen === gen && state.phase === 'settlement') apply({ type: 'ready', seat: AI });
-      }, 1100);
-    }
-    return;
-  }
-  if (currentActors(state).includes(AI)) {
-    setTimeout(() => {
-      if (myGen !== gen) return;
-      apply(aiChooseAction(state, AI, rng));
-    }, state.phase === 'respond' ? 950 : 720);
-  }
-}
-
-function newGame(): void {
-  gen++;
-  state = newMatch(rng);
-  history = [];
-  lastDiscard = null;
-  render();
-  scheduleNext();
+function flash(msg: string): void {
+  flashMsg = msg;
 }
 
 /* ---------------- 渲染 ---------------- */
 
 function handHTML(seat: Seat, dealing: boolean): string {
   const hand = state.hands[seat];
-  if (seat === AI) {
+  if (seat === opp) {
     const reveal = state.phase === 'settlement';
-    return hand.map((t) => (reveal ? tileFaceHTML(t, 't-sm') : backHTML('t-sm'))).join('');
+    return hand.map((t) => (reveal && t.id > 0 ? tileFaceHTML(t, 't-sm') : backHTML('t-sm'))).join('');
   }
-  const canPlay = state.phase === 'act' && state.turn === HUMAN;
+  const canPlay = state.phase === 'act' && state.turn === me && yourActions.some((a) => a.type === 'discard');
   return hand
     .map((t, i) => {
       const cls = 't-lg' + (state.drawnTile?.id === t.id ? ' drawn' : '');
       const delay = dealing ? ` style="animation-delay:${i * 35}ms"` : '';
-      return canPlay
+      return canPlay && t.id > 0
         ? `<button class="tbtn"${delay} data-discard="${t.id}" title="打出">${tileFaceHTML(t, cls)}</button>`
         : `<span class="twrap"${delay}>${tileFaceHTML(t, cls)}</span>`;
     })
@@ -148,8 +309,8 @@ function meldsHTML(seat: Seat): string {
   return state.melds[seat]
     .map((m) => {
       const label = m.type === 'peng' ? '碰' : m.concealed ? '暗杠' : m.upgraded ? '补杠' : '明杠';
-      const hide = seat === AI && m.concealed; // 暗杠对对手保密
-      const tiles = m.tiles.map((t) => (hide ? backHTML('t-xs') : tileFaceHTML(t, 't-xs'))).join('');
+      const hide = seat === opp && m.concealed; // 暗杠对对手保密
+      const tiles = m.tiles.map((t) => (hide || t.id < 0 ? backHTML('t-xs') : tileFaceHTML(t, 't-xs'))).join('');
       return `<span class="meld">${tiles}<i>${label}</i></span>`;
     })
     .join('');
@@ -180,48 +341,58 @@ function actionLabel(a: Action, seat: Seat): string {
 
 function phaseHint(): string {
   switch (state.phase) {
-    case 'choose_flower': return state.turn === HUMAN ? '请选择你的花色（定花）' : '对手正在定花…';
-    case 'act': return state.turn === HUMAN ? '轮到你 —— 点手牌出牌' : '对手思考中…';
+    case 'choose_flower': return state.turn === me ? '请选择你的花色（定花）' : '对手正在定花…';
+    case 'act': return state.turn === me ? '轮到你 —— 点手牌出牌' : '对手思考中…';
     case 'respond': {
       const t = state.pending ? tileText(state.pending.tile) : '';
-      return state.turn === HUMAN ? `对手打出 ${t}，吃不住就点「过」` : `你打出 ${t}，对手响应中…`;
+      return state.turn === me ? `对手打出 ${t}，吃不住就点「过」` : `你打出 ${t}，对手响应中…`;
     }
     case 'settlement': return '本局结束';
   }
 }
 
 function overlayHTML(): string {
+  if (menuOpen) {
+    return `<div class="overlay"><div class="card">
+      <h2>联机对战</h2>
+      <p class="dim">与另一名玩家同池对战（需要服务端在线）</p>
+      <button id="mkroom" class="abtn peng">创建房间</button>
+      <div class="joinrow">
+        <input id="joincode" maxlength="4" placeholder="房间号" autocomplete="off">
+        <button id="doroom" class="abtn choose_flower">加入</button>
+      </div>
+      <button id="closemenu" class="ghost" style="margin-top:14px">取消，继续人机对战</button>
+    </div></div>`;
+  }
   if (state.phase !== 'settlement' || !state.result) return '';
   const r = state.result;
-  const title = r.winner == null
-    ? '流 局'
-    : `${r.winner === HUMAN ? '🎉' : '💦'} ${seatName(r.winner)}胡了！`;
+  const title = r.winner == null ? '流 局' : `${r.winner === me ? '🎉' : '💦'} ${seatName(r.winner)}胡了！`;
   const sub = r.winner == null
     ? r.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
     : `${r.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${r.tile ? tileText(r.tile) : ''}`;
-  const hands = ([HUMAN, AI] as Seat[])
-    .map(
-      (s) =>
-        `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`,
-    )
+  const hands = ([me, opp] as Seat[])
+    .map((s) => `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].filter((t) => t.id > 0).map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`)
     .join('');
+  const waiting = state.ready[me] && !state.ready[opp];
+  const next = waiting
+    ? '<p class="tally">等待对手就绪…</p>'
+    : '<button id="next" class="abtn hu">下一局</button>';
   return `<div class="overlay"><div class="card">
     <h2>${title}</h2>
     <p>${sub}</p>
     ${hands}
-    <p class="tally">战绩 —— 你 <b>${state.tally.wins[HUMAN]}</b> 胜 · 对手 <b>${state.tally.wins[AI]}</b> 胜 · 流局 ${state.tally.draws}</p>
-    <button id="next" class="abtn hu">下一局</button>
+    <p class="tally">战绩 —— 你 <b>${state.tally.wins[me]}</b> 胜 · 对手 <b>${state.tally.wins[opp]}</b> 胜 · 流局 ${state.tally.draws}</p>
+    ${next}
   </div></div>`;
 }
 
 function render(): void {
-  pendingActions = [];
+  yourActions = online && view ? view.yourActions : availableActions(state, me);
   let abtns = '';
-  if (state.phase !== 'settlement' && currentActors(state).includes(HUMAN)) {
-    for (const a of availableActions(state, HUMAN)) {
+  if (state.phase !== 'settlement') {
+    for (const a of yourActions) {
       if (a.type === 'discard') continue;
-      pendingActions.push({ seat: HUMAN, a });
-      abtns += `<button class="abtn ${a.type}" data-idx="${pendingActions.length - 1}">${actionLabel(a, HUMAN)}</button>`;
+      abtns += `<button class="abtn ${a.type}" data-idx="${yourActions.indexOf(a)}">${actionLabel(a, me)}</button>`;
     }
   }
 
@@ -233,20 +404,24 @@ function render(): void {
     <header class="topbar">
       <span class="stat">第 ${state.round} 局</span>
       <span class="stat">庄 ${seatName(state.banker)}</span>
-      <span class="stat score">${state.tally.wins[HUMAN]}胜${state.tally.wins[AI]}负${state.tally.draws}流</span>
+      <span class="stat score">${state.tally.wins[me]}胜${state.tally.wins[opp]}负${state.tally.draws}流</span>
+      ${online ? `<span class="stat online">房间 <b>${online.code}</b></span>` : ''}
       <span class="spacer"></span>
+      ${online
+        ? '<button id="leavebtn" class="ghost">退出房间</button>'
+        : '<button id="onlinebtn" class="ghost">联机</button>'}
       <button id="logbtn" class="ghost" title="对局记录">☰</button>
       <button id="soundbtn" class="ghost" title="音效">${isMuted() ? '🔇' : '🔊'}</button>
-      <button id="newbtn" class="ghost" title="新对局">↻</button>
+      <button id="newbtn" class="ghost" title="新对局" ${online ? 'disabled' : ''}>↻</button>
     </header>
     <main class="table">
-      <section class="zone opp${currentActors(state).includes(AI) ? ' turn' : ''}">
+      <section class="zone opp${currentActors(state).includes(opp) ? ' turn' : ''}">
         <div class="meta">
-          <span class="plate"><b class="pdot"></b>对手 ${flowerChip(AI)}${state.banker === AI ? '<em>庄</em>' : ''}</span>
-          <span class="melds">${meldsHTML(AI)}</span>
+          <span class="plate"><b class="pdot"></b>对手 ${flowerChip(opp)}${state.banker === opp ? '<em>庄</em>' : ''}</span>
+          <span class="melds">${meldsHTML(opp)}</span>
         </div>
-        <div class="tray"><div class="river">${riverHTML(AI)}</div></div>
-        <div class="backs">${handHTML(AI, false)}</div>
+        <div class="tray"><div class="river">${riverHTML(opp)}</div></div>
+        <div class="backs">${handHTML(opp, false)}</div>
       </section>
       <section class="center">
         <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
@@ -255,17 +430,18 @@ function render(): void {
           ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
         </div>
       </section>
-      <section class="zone me${currentActors(state).includes(HUMAN) ? ' turn' : ''}">
-        <div class="tray"><div class="river">${riverHTML(HUMAN)}</div></div>
+      <section class="zone me${currentActors(state).includes(me) ? ' turn' : ''}">
+        <div class="tray"><div class="river">${riverHTML(me)}</div></div>
         <div class="meta">
-          <span class="plate"><b class="pdot"></b>你 ${flowerChip(HUMAN)}${state.banker === HUMAN ? '<em>庄</em>' : ''}</span>
-          <span class="melds">${meldsHTML(HUMAN)}</span>
+          <span class="plate"><b class="pdot"></b>你 ${flowerChip(me)}${state.banker === me ? '<em>庄</em>' : ''}</span>
+          <span class="melds">${meldsHTML(me)}</span>
         </div>
-        <div class="hand${dealing ? ' dealing' : ''}">${handHTML(HUMAN, dealing)}</div>
+        <div class="hand${dealing ? ' dealing' : ''}">${handHTML(me, dealing)}</div>
       </section>
     </main>
     <footer class="actionbar">${abtns}</footer>
     <aside id="logpanel" class="hidden">${history.map((h) => `<div>${h}</div>`).join('')}</aside>
+    ${flashMsg ? `<div id="toast">${flashMsg}</div>` : ''}
     ${overlayHTML()}
   `;
 
@@ -275,12 +451,28 @@ function render(): void {
     render();
   };
   document.getElementById('logbtn')!.onclick = () => document.getElementById('logpanel')!.classList.toggle('hidden');
-  document.getElementById('next')?.addEventListener('click', () => apply({ type: 'ready', seat: HUMAN }));
+  document.getElementById('onlinebtn')?.addEventListener('click', () => {
+    menuOpen = true;
+    render();
+  });
+  document.getElementById('leavebtn')?.addEventListener('click', goLocal);
+  document.getElementById('closemenu')?.addEventListener('click', () => {
+    menuOpen = false;
+    render();
+    scheduleNext();
+  });
+  document.getElementById('mkroom')?.addEventListener('click', () => createRoom());
+  document.getElementById('doroom')?.addEventListener('click', () => {
+    const v = (document.getElementById('joincode') as HTMLInputElement).value.trim().toUpperCase();
+    if (v.length === 4) joinRoom(v);
+  });
+  document.getElementById('next')?.addEventListener('click', () => doAction({ type: 'ready', seat: me }));
   app.querySelectorAll<HTMLButtonElement>('[data-idx]').forEach((b) => {
-    b.onclick = () => apply(pendingActions[Number(b.dataset.idx)]!.a);
+    const a = yourActions[Number(b.dataset.idx)];
+    if (a) b.onclick = () => doAction(a);
   });
   app.querySelectorAll<HTMLButtonElement>('[data-discard]').forEach((b) => {
-    b.onclick = () => apply({ type: 'discard', tileId: Number(b.dataset.discard) });
+    b.onclick = () => doAction({ type: 'discard', tileId: Number(b.dataset.discard) });
   });
 }
 

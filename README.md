@@ -26,7 +26,21 @@ npm run demo          # 或 cd packages/engine && npm run demo
 - 点击手牌出牌，碰/杠/胡/过用金色按钮；流局或胡牌后点「下一局」连续对局，战绩自动累计
 - 牌面为纯 SVG 绘制（筒=蓝圈、条=绿竹），音效为 WebAudio 合成，右上角可静音/查看对局记录
 
-## 结构（阶段一）
+## 联机对战（真实双端）
+
+```bash
+npm run server        # 启动联机服务端（同源托管前端）
+# 双方各自打开 http://localhost:8788（局域网内用本机 IP）
+# 一人点「联机 → 创建房间」，另一人输入 4 位房间号加入
+```
+
+- **服务端权威**：牌局状态只在服务端，客户端只发意图（不含座位，座位由连接身份绑定）
+- **按玩家视角过滤**：对手手牌/牌墙只发数量，摸牌张只有本人可见，结算才亮牌（`PlayerView`）
+- **超时托管**：行动超时（默认 20s，`MJ_AUTO_MS` 可调）或玩家掉线（4s）自动代打建议牌
+- **断线重连**：页面刷新/重连凭 `sessionStorage` 中的 token 自动回到对局
+- 房间纯内存态，双端断开 10 分钟后自动回收
+
+## 结构
 
 ```
 packages/engine   纯函数规则引擎（零运行时依赖）
@@ -41,17 +55,25 @@ packages/engine   纯函数规则引擎（零运行时依赖）
 ├── src/settlement.ts    结算与下一局
 ├── src/validator.ts     72张守恒 + 阶段不变量断言
 ├── src/engine.ts        reducer：(state, action, rng) → (state, events)
+├── src/suggest.ts       托管/建议策略（本地 AI 与服务端共用）
+├── src/view.ts          PlayerView 按玩家视角过滤（服务端下发契约）
 ├── src/sim.ts           随机自对弈模拟器
-└── demo/                本地人机对战小游戏（esbuild + 静态服务，零依赖）
+└── demo/                游戏前端（本地 AI + 联机客户端，esbuild 打包）
+
+packages/server   联机服务端（阶段二首版）
+├── src/rooms.ts         房间/座位绑定/超时托管/token 重连
+├── src/gateway.ts       Socket.IO 协议（room:create/join/rejoin、action、state）
+└── src/index.ts         HTTP 静态托管前端 + 网关装配
 ```
 
 ## 开发
 
 ```bash
 npm install
-npm test                # vitest 单元测试
+npm test                # 全 workspace 测试（引擎 41 + 服务端 7）
 npm run sim             # 随机自对弈模拟 + 守恒断言
-npm run demo            # 本地人机对战小游戏
+npm run demo            # 本地人机对战（8787）
+npm run server          # 联机服务端（8788）
 ```
 
 引擎为纯函数设计，随机性全部由注入的 `RNG` 决定（服务端接 `rng.node.ts` 的 cryptoRng，测试/模拟用 mulberry32 种子复现——种子生成器不得用于生产，详见架构文档五「随机源与座位绑定」）。
