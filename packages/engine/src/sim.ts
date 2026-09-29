@@ -79,7 +79,7 @@ function emptyStats(): Stats {
 
 function runMatch(seed: number, policy: Policy, targetRounds: number, stats: Stats): void {
   const rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
-  let s = newMatch(seed);
+  let s = newMatch(rng);
   let guard = 0;
   let roundsPlayed = 0;
 

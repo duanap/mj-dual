@@ -1,4 +1,5 @@
-// 可注入的可复现随机源。服务端接 crypto，模拟器用种子复现。
+// 可注入随机源接口。mulberry32 的全部内部状态只有 32 位、输出序列可被穷举，
+// 仅供测试/模拟复现；生产服务端必须使用 rng.node.ts 的 cryptoRng。
 export interface RNG {
   /** 均匀分布 [0, n) 的整数 */
   int(n: number): number;

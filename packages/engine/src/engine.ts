@@ -17,8 +17,11 @@ export class RuleError extends Error {
   }
 }
 
-export function newMatch(seed: number): GameState {
-  const rng = mulberry32(seed);
+/**
+ * 开新对局。rng 由调用方注入：生产服务端必须传 cryptoRng（rng.node.ts）。
+ * mulberry32 种子版全部内部状态仅 32 位、可按起手牌穷举反推整副牌序，仅限测试/模拟。
+ */
+export function newMatch(rng: RNG): GameState {
   const banker = rng.int(2) as Seat; // 规则二：首局随机庄
   const { hands, wall } = deal(rng, banker);
   return {
@@ -338,6 +341,8 @@ export function applyAction(state: GameState, action: Action, rng: RNG): ActionR
     }
 
     case 'ready': {
+      // action.seat 不可信：服务端必须按连接身份自行构造/覆盖座位后再调用 reducer，
+      // 严禁原样转发客户端 action（否则玩家可替对手就绪、使下一局提前开始）。
       requireCond(s.phase === 'settlement', 'WRONG_PHASE', '本局尚未结束');
       requireCond(!s.ready[action.seat], 'ALREADY_READY', '该玩家已就绪');
       s.ready[action.seat] = true;

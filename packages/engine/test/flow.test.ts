@@ -54,12 +54,12 @@ describe('定花与开局（规则三/四/六）', () => {
     expect(s2.hands[1].length).toBe(14); // 摸牌后
   });
 
-  it('首局庄家由种子决定且可复现', () => {
-    const a = newMatch(123);
-    const b = newMatch(123);
+  it('首局庄家由注入的 RNG 决定且可复现', () => {
+    const a = newMatch(mulberry32(123));
+    const b = newMatch(mulberry32(123));
     expect(a.banker).toBe(b.banker);
     expect(a.hands[0].map((t) => t.id)).toEqual(b.hands[0].map((t) => t.id));
-    const bankers = new Set(Array.from({ length: 30 }, (_, i) => newMatch(i + 1).banker));
+    const bankers = new Set(Array.from({ length: 30 }, (_, i) => newMatch(mulberry32(i + 1)).banker));
     expect([...bankers].sort()).toEqual([0, 1]);
   });
 });
