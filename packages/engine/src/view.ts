@@ -63,7 +63,11 @@ export function toPlayerView(state: GameState, seat: Seat, events: GameEvent[] =
     tally: state.tally,
     reveal: state.phase === 'settlement' ? state.hands : null,
     yourActions: state.phase === 'settlement' && !state.ready[seat] ? [{ type: 'ready', seat }] : availableActions(state, seat),
-    events,
+    events: events.map((event) =>
+      event.type === 'gang' && event.kind === 'an' && event.seat !== seat && !revealAll
+        ? { ...event, tile: HIDDEN_TILE }
+        : event,
+    ),
   };
 }
 

@@ -53,4 +53,19 @@ describe('PlayerView 按玩家视角过滤', () => {
     expect(v0).toHaveProperty('wallCount');
     expect(v0).not.toHaveProperty('wall');
   });
+
+  it('对手暗杠事件隐藏具体牌面，结算时才公开', () => {
+    const s = createMatchForTest({
+      hands: handsTuple('T1 T2 T3 T4 T5 T6 T7 T8 T9 T1 T2 T3 T4 B5', 'B1 B2 B3 B4 B5 B6 B7 B8 B9 B1 B2 B3 T5'),
+      flower: 'tong',
+    });
+    const event = { type: 'gang', seat: 1 as const, kind: 'an' as const, tile: { id: 20, suit: 'tiao' as const, rank: 8 as const } };
+    const activeView = toPlayerView(s, 0, [event]);
+    expect(activeView.events[0]).toMatchObject({ type: 'gang', seat: 1, kind: 'an', tile: { id: -1 } });
+    expect(JSON.stringify(activeView.events)).not.toContain('"id":20');
+    expect(toPlayerView(s, 1, [event]).events[0]).toEqual(event);
+
+    s.phase = 'settlement';
+    expect(toPlayerView(s, 0, [event]).events[0]).toEqual(event);
+  });
 });

@@ -6,6 +6,7 @@ import { RuleError, applyAction, availableActions, currentActors, newMatch, sugg
 import { cryptoRng } from '@mj/engine/rng.node';
 import { toPlayerView, type PlayerView } from '@mj/engine';
 import type { GameEvent } from '@mj/engine';
+import type { RoomControlResult, RoomGameView, RoomPhase, RoomSnapshot } from './protocol';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const EMPTY_TTL_MS = 10 * 60_000;
@@ -74,9 +75,9 @@ function isLegal(state: GameState, seat: Seat, action: Action): boolean {
 
 export class Room {
   readonly code: string;
-  readonly tokens: readonly [string, string];
+  readonly tokens: [string, string];
   sids: [string | null, string | null] = [null, null];
-  state: GameState;
+  state: GameState | null = null;
   /** 每次状态推送携带的对局事件（客户端日志/音效用） */
   private lastEvents: GameEvent[] = [];
   private rng: RNG;
@@ -84,8 +85,7 @@ export class Room {
   private autoMs: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private seat1Issued = false;
-  /** 首次满员后开始计时；此后断线只缩短托管延时，不再停表 */
-  private started = false;
+  private closed = false;
   emptySince: number | null = null;
 
   constructor(code: string, send: SendFn, opts: RoomOptions = {}) {
@@ -93,17 +93,76 @@ export class Room {
     this.send = send;
     this.autoMs = opts.autoMs ?? 20_000;
     this.rng = opts.rngFactory ? opts.rngFactory() : cryptoRng;
-    this.state = newMatch(this.rng);
     this.tokens = [randomUUID(), randomUUID()];
   }
 
   view(seat: Seat): PlayerView {
+    if (!this.state) throw new Error('房间尚未开始');
     return toPlayerView(this.state, seat, this.lastEvents);
+  }
+
+  snapshot(seat: Seat): RoomSnapshot {
+    const state = this.state;
+    const phase: RoomPhase = state == null ? 'waiting' : state.phase === 'settlement' ? 'finished' : 'playing';
+    const view: RoomGameView | null = state == null ? null : omitReady(this.view(seat));
+    const bothConnected = this.sids[0] != null && this.sids[1] != null;
+    return {
+      code: this.code,
+      you: seat,
+      host: 0,
+      phase,
+      members: [{ connected: this.sids[0] != null }, { connected: this.sids[1] != null }],
+      round: state?.round ?? 0,
+      tally: state?.tally ?? { wins: [0, 0], draws: 0 },
+      view,
+      canStart: seat === 0 && phase === 'waiting' && bothConnected,
+      canRematch: seat === 0 && phase === 'finished' && bothConnected,
+    };
+  }
+
+  start(seat: Seat, sid: string): RoomControlResult {
+    const auth = this.authorizeHost(seat, sid);
+    if (!auth.ok) return auth;
+    if (this.state != null) return failure('WRONG_PHASE', '房间已经开始');
+    if (!this.connected(1)) return failure('PLAYER_NOT_CONNECTED', '等待玩家加入并在线');
+    this.state = newMatch(this.rng);
+    this.lastEvents = [];
+    this.pushState();
+    this.armAuto();
+    return { ok: true };
+  }
+
+  leavePlayer(seat: Seat, sid: string): RoomControlResult {
+    if (seat !== 1) return failure('NOT_PLAYER', '只有玩家可以退出房间');
+    if (this.sids[1] !== sid) return failure('STALE_SESSION', '房间连接已失效');
+    this.sids[1] = null;
+    this.tokens[1] = randomUUID();
+    this.seat1Issued = false;
+    this.state = null;
+    this.lastEvents = [];
+    this.disposeTimer();
+    this.afterMembershipChange();
+    return { ok: true };
+  }
+
+  dissolve(seat: Seat, sid: string): RoomControlResult {
+    const auth = this.authorizeHost(seat, sid);
+    if (!auth.ok) return auth;
+    this.disposeTimer();
+    this.closed = true;
+    this.sids = [null, null];
+    return { ok: true };
+  }
+
+  private authorizeHost(seat: Seat, sid: string): RoomControlResult {
+    if (seat !== 0) return failure('NOT_HOST', '只有房主可以执行此操作');
+    if (this.sids[0] !== sid) return failure('STALE_SESSION', '房间连接已失效');
+    return { ok: true };
   }
 
   /** 连接绑定到座位；token 校验失败返回 null。顶掉旧连接时先通知它。 */
   bind(sid: string, seat: Seat, token: string): boolean {
-    if (this.tokens[seat] !== token) return false;
+    if (this.closed || this.tokens[seat] !== token) return false;
     if (seat === 1) this.seat1Issued = true; // 出示过 token 即视为已发放
     const prev = this.sids[seat];
     if (prev != null && prev !== sid) this.send(seat, 'room:kicked', {});
@@ -141,7 +200,6 @@ export class Room {
   }
 
   private afterMembershipChange(): void {
-    if (this.sids[0] != null && this.sids[1] != null) this.started = true;
     this.pushState();
     // 座位1尚未发放（房主刚创建）时不发在场事件，避免"对手掉线"的误导性提示
     if (this.seat1Issued) {
@@ -161,13 +219,17 @@ export class Room {
 
   pushState(): void {
     for (const seat of [0, 1] as const) {
-      if (this.sids[seat] != null) this.send(seat, 'state', this.view(seat));
+      if (this.sids[seat] == null) continue;
+      this.send(seat, 'room:snapshot', this.snapshot(seat));
+      if (this.state) this.send(seat, 'state', this.view(seat));
     }
     this.lastEvents = []; // 事件只随首次推送携带，成员变动等后续推送不再重发（防客户端日志/音效重复）
   }
 
   /** 客户端意图：座位一律服务端盖章；合法性先于引擎校验 */
   action(seat: Seat, raw: unknown): { ok: true } | { ok: false; code: string; message: string } {
+    if (this.closed) return failure('ROOM_CLOSED', '房间已解散');
+    if (!this.state) return failure('NOT_STARTED', '房间尚未开始');
     const parsed = normalizeAction(raw);
     if (parsed == null) return { ok: false, code: 'BAD_ACTION', message: '操作格式非法' };
     const action: Action = parsed.type === 'ready' ? { type: 'ready', seat } : parsed;
@@ -193,7 +255,7 @@ export class Room {
 
   private armAuto(): void {
     if (this.timer) clearTimeout(this.timer);
-    if (!this.started) return; // 未满员不计时，等双方到齐才开始对局
+    if (!this.state || this.state.phase === 'settlement') return; // 等待开始与结算状态都不自动推进
     if (this.isEmpty()) return; // 无人在线时冻结牌局，任意一方重连即自动恢复
     const anyDisconnected = !this.connected(0) || !this.connected(1);
     const delay = anyDisconnected ? DISCONNECT_AUTO_MS : this.autoMs;
@@ -203,18 +265,14 @@ export class Room {
   /** 超时托管：对当前所有待操作座位代打建议操作（架构文档九） */
   private autoStep(): void {
     const s = this.state;
-    if (s.phase === 'settlement') {
-      for (const seat of [0, 1] as const) {
-        if (!s.ready[seat]) this.forceApply({ type: 'ready', seat });
-      }
-      return;
-    }
+    if (!s || s.phase === 'settlement') return;
     for (const seat of currentActors(s)) {
       this.forceApply(suggestAction(s, seat, this.rng));
     }
   }
 
   private forceApply(action: Action): void {
+    if (!this.state) return;
     try {
       const res = applyAction(this.state, action, this.rng);
       this.state = res.state;
@@ -233,9 +291,22 @@ export class Room {
   }
 
   dispose(): void {
+    this.disposeTimer();
+  }
+
+  private disposeTimer(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
+}
+
+function omitReady(view: PlayerView): RoomGameView {
+  const { ready: _ready, ...gameView } = view;
+  return gameView;
+}
+
+function failure(code: string, message: string): RoomControlResult {
+  return { ok: false, code, message };
 }
 
 export class RoomManager {
