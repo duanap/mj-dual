@@ -23,24 +23,29 @@ npm run demo          # 或 cd packages/engine && npm run demo
 ```
 
 - 你执座位 0，只看得到自己的手牌；AI 执座位 1（贪心策略：能胡就胡、能杠就杠、能碰就碰，出牌保花色搭子）
-- 点击手牌选择，再点同一张确认出牌（键盘 Enter/空格也可操作，Esc 取消选择）；定花/碰/杠/胡/过在手牌上方操作，流局或胡牌后点「下一局」连续对局
+- 点击手牌选择，再点同一张确认出牌（键盘 Enter/空格也可操作，Esc 取消选择）；定花/碰/杠/胡/过在手牌上方操作
 - 按参考图统一牌面：深绿同心筒圈、红色点缀、实体竹条、折线八条、简洁鸟形幺鸡；手牌按花色/点数整理，摸牌单独置于右侧；音效为 WebAudio 合成
 - 双方弃牌上下相对摆在同一块桌面，手机紧凑牌河显示最近 6 张，顶栏「牌河」可查看双方全部弃牌；右上角可静音/查看对局记录
-- 界面固定为横向布局：竖屏窗口通过 CSS 将整个游戏转为横向，弹层和触控区域随界面一起旋转；不请求系统方向权限，也不显示旋转提示
+- 游戏使用全屏背景和横向牌桌；窄屏竖屏窗口通过 CSS 将整个游戏转为横向，弹窗和触控区域随界面一起旋转；不请求系统方向权限，也不显示旋转提示
+- 胡牌或流局后亮出双方手牌与副露；点「再来一局」才继续，杠、胡和流局会显示短暂提示
 
 ## 联机对战（真实双端）
 
 ```bash
+npm run build:demo --workspace @mj/engine
 npm run server        # 启动联机服务端（同源托管前端）
 # 双方各自打开 http://localhost:8788（局域网内用本机 IP）
-# 一人点「联机 → 创建房间」，另一人输入 4 位房间号加入
+# 房主点「房间 → 创建房间」，玩家输入 4 位房间号加入；随后房主点「开始游戏」
 ```
 
+- 创建和加入后自动打开房间窗口；房主开始后自动关闭。房主可解散房间，玩家可退出；遮罩空白、关闭按钮和 Esc 都能关闭窗口。
+- 对局结束后双方看到完整手牌和副露。房主点「再来一局」同时推进双方，玩家等待房主；结算不会自动开始下一局。
 - **服务端权威**：牌局状态只在服务端，客户端只发意图（不含座位，座位由连接身份绑定）
-- **按玩家视角过滤**：对手手牌/牌墙只发数量，摸牌张只有本人可见，结算才亮牌（`PlayerView`）
+- **按玩家视角过滤**：对手手牌/牌墙只发数量，摸牌张只有本人可见；对手暗杠的牌面与事件在结算前保持隐藏（`RoomSnapshot`）
 - **超时托管**：行动超时（默认 20s，`MJ_AUTO_MS` 可调）或玩家掉线（4s）自动代打建议牌
 - **断线重连**：页面刷新/重连凭 `sessionStorage` 中的 token 自动回到对局
-- 房间纯内存态，双端断开 10 分钟后自动回收
+- 房间纯内存态，双端断开 10 分钟后自动回收；部署服务端会结束当前房间
+- 在线客户端使用协议版本 2；收到旧版本提示时刷新页面后重新加入
 - 部署时可通过 `HOST=127.0.0.1`、`PORT` 指定监听地址与端口；未设置 `HOST` 时保持局域网可访问的默认监听方式
 
 ## 结构
@@ -63,9 +68,10 @@ packages/engine   纯函数规则引擎（零运行时依赖）
 ├── src/sim.ts           随机自对弈模拟器
 └── demo/                游戏前端（本地 AI + 联机客户端，esbuild 打包）
 
-packages/server   联机服务端（阶段二首版）
-├── src/rooms.ts         房间/座位绑定/超时托管/token 重连
-├── src/gateway.ts       Socket.IO 协议（room:create/join/rejoin、action、state）
+packages/server   联机服务端
+├── src/rooms.ts         房间/座位绑定/房主控制/超时托管/token 重连
+├── src/protocol.ts      按玩家视角过滤的房间快照
+├── src/gateway.ts       Socket.IO 协议（建房、开局、退出、解散、重开、action）
 └── src/index.ts         HTTP 静态托管前端 + 网关装配
 ```
 
@@ -73,15 +79,16 @@ packages/server   联机服务端（阶段二首版）
 
 ```bash
 npm install
-npm test                # 全 workspace 测试（引擎/UI交互 53 + 服务端 9）
+npm test                # 全 workspace 测试（引擎/UI交互 67 + 服务端 17）
 npm run typecheck --workspaces --if-present
 npm run typecheck:demo --workspace @mj/engine
 npm run sim             # 随机自对弈模拟 + 守恒断言
+npm run build:demo --workspace @mj/engine
 npm run demo            # 本地人机对战（8787）
 npm run server          # 联机服务端（8788）
 ```
 
 引擎为纯函数设计，随机性全部由注入的 `RNG` 决定（服务端接 `rng.node.ts` 的 cryptoRng，测试/模拟用 mulberry32 种子复现——种子生成器不得用于生产，详见架构文档五「随机源与座位绑定」）。
-联机服务端已经实现 Socket.IO 房间/超时/重连；后续阶段为 `apps/web`（Vue3 PWA）。
+联机房间状态保存在服务端内存；开局和再来一局由房主控制。当前没有登录或数据库。
 
 牌面符号按用户参考图重做为清晰 SVG，位于 `packages/engine/demo/assets/reference/`；牌体沿用 [FluffyStuff/riichi-mahjong-tiles](https://github.com/FluffyStuff/riichi-mahjong-tiles) 的 `Front.svg`（CC0 / 公共领域），来源与许可保存在 `packages/engine/demo/assets/tiles/`。素材打包为内置图片，不需要运行时联网下载。
