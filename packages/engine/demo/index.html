@@ -58,18 +58,18 @@
   .wall-disc { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 48px; padding: 9px 12px; border-radius: 9px; background: #173c32; }
   .wall-disc b { font-size: 22px; color: var(--accent); font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .wall-disc span { font-size: 10px; color: var(--muted); margin-top: 3px; }
-  .tface { display: inline-flex; vertical-align: bottom; flex: none; padding: 3px; background: #fffdf7; border: 1px solid #d7ded0; border-bottom: 3px solid #c1ccbc; border-radius: 6px; box-shadow: 0 2px 3px #071d2430; }
-  .tface svg { display: block; }
-  .t-lg svg { width: var(--t-lg); height: calc(var(--t-lg) * 1.4); }
-  .t-md svg { width: var(--t-md); height: calc(var(--t-md) * 1.4); }
-  .t-sm svg { width: var(--t-sm); height: calc(var(--t-sm) * 1.4); }
-  .t-xs svg { width: var(--t-xs); height: calc(var(--t-xs) * 1.4); }
-  .t-sm .tile-detail, .t-xs .tile-detail { display: none; }
-  .tface.back { background: #578779; border-color: #80a697; border-bottom-color: #37675b; position: relative; box-shadow: 0 2px 3px #0002; }
+  .tface { position: relative; display: inline-flex; vertical-align: bottom; flex: none; border-radius: 6px; box-shadow: 0 2px 3px #071d2430; }
+  .tile-front, .tile-art { display: block; pointer-events: none; user-select: none; object-fit: fill; border-radius: inherit; }
+  .tile-art { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .t-lg .tile-front { width: calc(var(--t-lg) + 8px); height: calc(var(--t-lg) * 1.4 + 10px); }
+  .t-md .tile-front { width: calc(var(--t-md) + 8px); height: calc(var(--t-md) * 1.4 + 10px); }
+  .t-sm .tile-front { width: calc(var(--t-sm) + 8px); height: calc(var(--t-sm) * 1.4 + 10px); }
+  .t-xs .tile-front { width: calc(var(--t-xs) + 8px); height: calc(var(--t-xs) * 1.4 + 10px); }
+  .tface.back { padding: 3px; border: 1px solid #80a697; border-bottom: 3px solid #37675b; background: #578779; position: relative; box-shadow: 0 2px 3px #0002; }
   .tface.back::after { content: ""; position: absolute; inset: 5px; border: 1px solid #b3d0bf66; border-radius: 3px; }
   .back.t-sm { width: calc(var(--t-sm) + 8px); height: calc(var(--t-sm) * 1.4 + 10px); }
   .back.t-xs { width: calc(var(--t-xs) + 8px); height: calc(var(--t-xs) * 1.4 + 10px); }
-  .tface.drawn { border-bottom-color: #7aa88b; }
+  .tface.drawn { box-shadow: 0 2px 0 #7aa88b, 0 3px 4px #071d2430; }
   .tface.latest { box-shadow: 0 0 0 2px var(--gold); }
   .tface.last { box-shadow: 0 0 0 2px #9fc4af, 0 5px 10px #0002; }
   .hand-area { container-type: inline-size; width: 100%; }
