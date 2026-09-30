@@ -25,7 +25,8 @@ npm run demo          # 或 cd packages/engine && npm run demo
 - 你执座位 0，只看得到自己的手牌；AI 执座位 1（贪心策略：能胡就胡、能杠就杠、能碰就碰，出牌保花色搭子）
 - 点击手牌选择，再点同一张确认出牌（键盘 Enter/空格也可操作，Esc 取消选择）；碰/杠/胡/过在手牌下方操作，流局或胡牌后点「下一局」连续对局
 - 现代简洁 SVG 牌面（筒=靛蓝圆环、条=翠绿竹节、一条=幺鸡），手牌按花色/点数整理，摸牌单独置于右侧；音效为 WebAudio 合成
-- 桌面和手机横屏自适应一排手牌；手机紧凑牌河显示最近 6 张，顶栏「牌河」可查看双方全部弃牌；右上角可静音/查看对局记录
+- 双方弃牌上下相对摆在同一块桌面，手机紧凑牌河显示最近 6 张，顶栏「牌河」可查看双方全部弃牌；右上角可静音/查看对局记录
+- 界面固定为横向布局：竖屏窗口通过 CSS 将整个游戏转为横向，弹层和触控区域随界面一起旋转；不请求系统方向权限，也不显示旋转提示
 
 ## 联机对战（真实双端）
 
@@ -71,7 +72,7 @@ packages/server   联机服务端（阶段二首版）
 
 ```bash
 npm install
-npm test                # 全 workspace 测试（引擎/UI交互 50 + 服务端 9）
+npm test                # 全 workspace 测试（引擎/UI交互 53 + 服务端 9）
 npm run typecheck --workspaces --if-present
 npm run typecheck:demo --workspace @mj/engine
 npm run sim             # 随机自对弈模拟 + 守恒断言

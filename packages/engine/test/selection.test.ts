@@ -1,5 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { DiscardSelection } from '../demo/selection';
+import { DiscardSelection, discardTargets } from '../demo/selection';
+
+describe('同牌副本的出牌映射', () => {
+  const hand = [
+    { id: 39, suit: 'tiao' as const, rank: 1 },
+    { id: 36, suit: 'tiao' as const, rank: 1 },
+    { id: 48, suit: 'tiao' as const, rank: 4 },
+  ];
+  it('排序后的任意同牌副本都对应服务端给出的合法代表', () => {
+    const targets = discardTargets(hand, [{ type: 'discard', tileId: 39 }]);
+    expect(targets.get(36)).toBe(39);
+    expect(targets.get(39)).toBe(39);
+    expect(targets.has(48)).toBe(false);
+  });
+  it('零号一筒也能作为合法出牌代表', () => {
+    const targets = discardTargets([
+      { id: 1, suit: 'tong', rank: 1 }, { id: 0, suit: 'tong', rank: 1 },
+    ], [{ type: 'discard', tileId: 0 }]);
+    expect(targets.get(1)).toBe(0);
+    expect(targets.get(0)).toBe(0);
+  });
+  it('不为隐藏占位牌或未获授权的牌面创建出牌目标', () => {
+    const targets = discardTargets([...hand, { id: -1, suit: 'tiao', rank: 1 }], [
+      { type: 'discard', tileId: 39 }, { type: 'gang', tileId: 48, kind: 'an' },
+    ]);
+    expect(targets.has(-1)).toBe(false);
+    expect(targets.has(48)).toBe(false);
+  });
+});
 
 describe('手牌二次确认', () => {
   it('第一次点击只选牌，第二次点击同一张才出牌', () => {

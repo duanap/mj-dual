@@ -6,7 +6,7 @@ import type { Action, GameEvent, GameState, PlayerView, RNG, Seat, Tile } from '
 import { applyAction, availableActions, currentActors, newMatch, suggestAction } from '../src/index';
 import { backHTML, tileFaceHTML, tileText } from './tiles';
 import { isMuted, setMuted, sfx } from './audio';
-import { DiscardSelection } from './selection';
+import { DiscardSelection, discardTargets } from './selection';
 
 // 浏览器 CSPRNG：crypto.getRandomValues + 拒绝采样（与生产随机源纪律一致）
 const rng: RNG = {
@@ -32,9 +32,10 @@ let flashMsg = '';
 let menuOpen = false; // 联机菜单（暂停本地对局）
 let yourActions: Action[] = [];
 const selection = new DiscardSelection();
+let discardMap = new Map<number, number>();
 let riverOpen = false;
 const selectionContext = (): string => `${online?.code ?? `local:${gen}`}:${state.round}:${state.seq}`;
-const legalDiscards = (): number[] => yourActions.flatMap((a) => a.type === 'discard' ? [a.tileId] : []);
+const legalDiscards = (): number[] => [...discardMap.keys()];
 
 interface Online {
   socket: Socket;
@@ -363,7 +364,7 @@ function meldsHTML(seat: Seat): string {
 function riverHTML(seat: Seat, full = false): string {
   const all = state.rivers[seat];
   // 手机横屏（矮视口）只保留最近 6 张，避免中央区溢出
-  const compact = window.matchMedia('(orientation: landscape) and (max-height: 560px)').matches;
+  const compact = Math.min(window.innerWidth, window.innerHeight) <= 560;
   const r = compact && !full ? all.slice(-6) : all;
   return r.map((t, i) => tileFaceHTML(t, 't-sm', i === r.length - 1 && all.length > 0 ? 'latest' : '')).join('');
 }
@@ -448,7 +449,11 @@ function overlayHTML(): string {
 function render(): void {
   if (state.phase === 'settlement') riverOpen = false;
   const focusedId = document.activeElement?.id;
+  const previousCode = document.getElementById('joincode') as HTMLInputElement | null;
+  const codeDraft = previousCode?.value;
+  const codeCursor = previousCode ? [previousCode.selectionStart, previousCode.selectionEnd] : null;
   yourActions = online && view ? view.yourActions : availableActions(state, me);
+  discardMap = discardTargets(state.hands[me], yourActions);
   selection.sync(selectionContext(), legalDiscards());
   let abtns = '';
   if (state.phase !== 'settlement') {
@@ -485,14 +490,16 @@ function render(): void {
         </div>
         <div class="backs${dealing ? ' dealing' : ''}">${handHTML(opp, dealing)}</div>
       </section>
-      <section class="center">
-        <div class="tray" data-label="对手牌河 · ${state.rivers[opp].length} 张"><div class="river">${riverHTML(opp)}</div></div>
-        <div class="mid">
+      <section class="center" aria-label="共享牌桌">
+        <div class="table-status">
           <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
-          <span class="hint">${phaseHint()}</span>
           ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
+          <span class="hint" role="status">${phaseHint()}</span>
         </div>
-        <div class="tray" data-label="你的牌河 · ${state.rivers[me].length} 张"><div class="river">${riverHTML(me)}</div></div>
+        <div class="discard-field">
+          <div class="discard-side opp-discard"><span class="river-label">对手 · ${state.rivers[opp].length} 张</span><div class="river">${riverHTML(opp)}</div></div>
+          <div class="discard-side me-discard"><div class="river">${riverHTML(me)}</div><span class="river-label">你 · ${state.rivers[me].length} 张</span></div>
+        </div>
       </section>
       <section class="zone me${currentActors(state).includes(me) ? ' turn' : ''}">
         <div class="meta">
@@ -543,7 +550,7 @@ function render(): void {
     b.onclick = () => {
       const id = Number(b.dataset.discard);
       const discard = selection.choose(selectionContext(), id, legalDiscards());
-      if (discard !== null) doAction({ type: 'discard', tileId: discard });
+      if (discard !== null) doAction({ type: 'discard', tileId: discardMap.get(discard)! });
       else {
         render();
         app.querySelector<HTMLButtonElement>(`[data-discard="${id}"]`)?.focus({ preventScroll: true });
@@ -551,12 +558,15 @@ function render(): void {
     };
   });
   const dialogOpen = menuOpen || riverOpen || state.phase === 'settlement';
-  app.querySelectorAll<HTMLElement>('.tray').forEach((el) => { el.scrollTop = el.scrollHeight; });
+  const codeInput = document.getElementById('joincode') as HTMLInputElement | null;
+  if (codeInput && codeDraft !== undefined) codeInput.value = codeDraft;
+  app.querySelectorAll<HTMLElement>('.discard-side .river').forEach((el) => { el.scrollTop = el.scrollHeight; });
   app.querySelectorAll<HTMLElement>('.topbar,.table,#logpanel').forEach((el) => { el.inert = dialogOpen; });
   if (dialogOpen) {
     const previous = focusedId ? document.getElementById(focusedId) : null;
     const fallback = document.getElementById(riverOpen && !menuOpen ? 'closeriver' : menuOpen ? 'mkroom' : 'next');
     (previous?.closest('.card') ? previous : fallback)?.focus({ preventScroll: true });
+    if (focusedId === 'joincode' && codeInput && codeCursor) codeInput.setSelectionRange(codeCursor[0], codeCursor[1]);
   }
 }
 
@@ -583,7 +593,11 @@ document.addEventListener('keydown', (event) => {
   render();
   if (returnToRiver) document.getElementById('riverbtn')?.focus();
 });
-window.matchMedia('(orientation: landscape) and (max-height: 560px)').addEventListener('change', () => render());
+let resizeFrame = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(() => render());
+});
 
 render();
 scheduleNext();

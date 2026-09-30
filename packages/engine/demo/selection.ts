@@ -1,3 +1,21 @@
+import type { Action, Tile } from '../src/index';
+
+/** The engine deduplicates equal faces; UI may display every physical copy. */
+export function discardTargets(hand: readonly Tile[], actions: readonly Action[]): Map<number, number> {
+  const byFace = new Map<string, number>();
+  for (const action of actions) {
+    if (action.type !== 'discard') continue;
+    const tile = hand.find((t) => t.id === action.tileId && t.id >= 0);
+    if (tile) byFace.set(`${tile.suit}:${tile.rank}`, action.tileId);
+  }
+  const targets = new Map<number, number>();
+  for (const tile of hand) {
+    const target = byFace.get(`${tile.suit}:${tile.rank}`);
+    if (tile.id >= 0 && target !== undefined) targets.set(tile.id, target);
+  }
+  return targets;
+}
+
 /** Client-side selection only; legal discards still come from the engine/server. */
 export class DiscardSelection {
   id: number | null = null;
