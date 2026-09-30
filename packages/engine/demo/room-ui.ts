@@ -59,3 +59,11 @@ export function renderRoomDialog(snapshot: RoomSnapshot | null, error?: string):
     <div class="room-actions">${controls}</div>
   </section>`;
 }
+
+export type SettlementActor = 'local' | 'host' | 'player';
+
+export function renderSettlementActions(actor: SettlementActor, canRematch = true): string {
+  if (actor === 'local') return button('local-rematch', '再来一局', false, 'primary');
+  if (actor === 'host') return button('room-rematch', '再来一局', !canRematch, 'primary');
+  return '<p class="room-waiting">等待房主再来一局</p>';
+}

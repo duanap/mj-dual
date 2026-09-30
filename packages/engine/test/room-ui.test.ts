@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RoomSnapshot } from '../../server/src/protocol';
-import { renderRoomDialog } from '../demo/room-ui';
+import { renderRoomDialog, renderSettlementActions } from '../demo/room-ui';
 
 const base: RoomSnapshot = {
   code: 'ABCD',
@@ -65,5 +65,23 @@ describe('房间弹窗', () => {
     expect(html).not.toContain('<img');
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('人机结算只显示再来一局，不显示准备流程', () => {
+    const html = renderSettlementActions('local');
+    expect(html).toContain('data-action="local-rematch"');
+    expect(html).toContain('再来一局');
+    expect(html).not.toContain('准备');
+    expect(html).not.toContain('就绪');
+  });
+
+  it('联机结算只允许房主再来一局，玩家等待房主', () => {
+    const host = renderSettlementActions('host', false);
+    expect(host).toContain('data-action="room-rematch"');
+    expect(host).toContain('disabled');
+
+    const player = renderSettlementActions('player');
+    expect(player).toContain('等待房主再来一局');
+    expect(player).not.toContain('data-action="room-rematch"');
   });
 });

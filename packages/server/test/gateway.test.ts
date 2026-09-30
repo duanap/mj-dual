@@ -104,7 +104,7 @@ describe('联机协议（双客户端）', () => {
     expect(finishedHost.view.reveal).not.toBeNull();
     expect(finishedHost.view).not.toHaveProperty('ready');
     const ready: any = await ack(player, 'action', { type: 'ready', seat: 0 });
-    expect(ready).toMatchObject({ ok: false });
+    expect(ready).toMatchObject({ ok: false, code: 'BAD_ACTION' });
     expect(internalRoom.state!.phase).toBe('settlement');
 
     const rematchHost = once<any>(host, 'room:snapshot');

@@ -1,8 +1,9 @@
-import type { PlayerView } from '@mj/engine';
-import type { Seat } from '@mj/engine';
+import type { Action, PlayerView, Seat } from '@mj/engine';
 
 export type RoomPhase = 'waiting' | 'playing' | 'finished';
-export type RoomGameView = Omit<PlayerView, 'ready'>;
+export type RoomGameView = Omit<PlayerView, 'ready' | 'yourActions'> & {
+  yourActions: Exclude<Action, { type: 'ready' }>[];
+};
 
 export interface RoomMemberSnapshot {
   connected: boolean;

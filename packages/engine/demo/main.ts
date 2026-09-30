@@ -8,7 +8,9 @@ import type { RoomGameView, RoomSnapshot } from '../../server/src/protocol';
 import { backHTML, tileFaceHTML, tileText } from './tiles';
 import { isMuted, setMuted, sfx } from './audio';
 import { DiscardSelection, discardTargets } from './selection';
-import { renderRoomDialog } from './room-ui';
+import { celebrationForEvent, type GameEffect } from './effects';
+import { advanceLocalRound } from './round-flow';
+import { renderRoomDialog, renderSettlementActions } from './room-ui';
 
 // 浏览器 CSPRNG：crypto.getRandomValues + 拒绝采样（与生产随机源纪律一致）
 const rng: RNG = {
@@ -32,6 +34,8 @@ let lastDiscard: Tile | null = null;
 let lastRound = -1;
 let localResultRound = -1;
 let flashMsg = '';
+let activeEffect: GameEffect | null = null;
+let effectRevision = 0;
 type ModalKind = 'room' | 'river' | 'records' | 'settlement';
 let modal: ModalKind | null = null;
 let modalReturnFocusId: string | null = null;
@@ -66,6 +70,8 @@ const flowerChip = (s: Seat): string => {
 function goLocal(): void {
   selection.reset();
   modal = null;
+  activeEffect = null;
+  effectRevision++;
   if (online) {
     online.socket.disconnect();
     online = null;
@@ -112,6 +118,7 @@ function consumeEvents(events: GameEvent[]): void {
   for (const e of events) {
     history.unshift(fmtEvent(e));
     sfxFor(e);
+    showEffect(e);
   }
   if (history.length > 120) history.length = 120;
 }
@@ -128,8 +135,26 @@ function onRoomSnapshot(snapshot: RoomSnapshot): void {
     state = viewToState(snapshot.view);
   }
   if (snapshot.phase === 'finished' && previousPhase !== 'finished') modal = 'settlement';
-  if ((previousPhase === 'waiting' || previousPhase === 'finished') && snapshot.phase === 'playing') modal = null;
+  if ((previousPhase === 'waiting' || previousPhase === 'finished') && snapshot.phase === 'playing') {
+    modal = null;
+    if (previousPhase === 'finished') {
+      activeEffect = null;
+      effectRevision++;
+    }
+  }
   render();
+}
+
+function showEffect(event: GameEvent): void {
+  const effect = celebrationForEvent(event, me);
+  if (!effect) return;
+  activeEffect = effect;
+  const revision = ++effectRevision;
+  window.setTimeout(() => {
+    if (effectRevision !== revision) return;
+    activeEffect = null;
+    render();
+  }, 1_200);
 }
 
 function connectOnline(): Socket {
@@ -293,7 +318,7 @@ function handleModalAction(action: string): void {
     case 'room-leave': roomControl('leave'); break;
     case 'room-dissolve': roomControl('dissolve'); break;
     case 'open-room': openModal('room'); break;
-    case 'local-next': doAction({ type: 'ready', seat: me }); break;
+    case 'local-rematch': continueLocalRound(); break;
   }
 }
 
@@ -348,17 +373,27 @@ function applyLocal(a: Action): void {
   scheduleNext();
 }
 
+function continueLocalRound(): void {
+  if (online || state.phase !== 'settlement') return;
+  try {
+    const next = advanceLocalRound(state, rng);
+    state = next.state;
+    activeEffect = null;
+    effectRevision++;
+    consumeEvents(next.events);
+    flash('');
+    modal = null;
+  } catch (err) {
+    flash(err instanceof Error ? err.message : String(err));
+  }
+  render();
+  scheduleNext();
+}
+
 function scheduleNext(): void {
   if (online || modal) return; // 联机由服务端驱动；弹窗打开时暂停本地对局
   const myGen = gen;
-  if (state.phase === 'settlement') {
-    if (currentActors(state).includes(opp)) {
-      setTimeout(() => {
-        if (myGen === gen && state.phase === 'settlement') applyLocal({ type: 'ready', seat: opp });
-      }, 1100);
-    }
-    return;
-  }
+  if (state.phase === 'settlement') return;
   if (currentActors(state).includes(opp)) {
     setTimeout(() => {
       if (myGen !== gen || modal) return;
@@ -372,6 +407,8 @@ function newGame(): void {
   gen++;
   selection.reset();
   modal = null;
+  activeEffect = null;
+  effectRevision++;
   state = newMatch(rng);
   history = [];
   lastDiscard = null;
@@ -390,7 +427,11 @@ function fmtEvent(e: GameEvent): string {
     case 'drawn': return `${seatName(e.seat)} 摸牌`;
     case 'discarded': return `${seatName(e.seat)} 打出 ${tileText(e.tile)}`;
     case 'peng': return `${seatName(e.seat)} 碰 ${tileText(e.tile)}`;
-    case 'gang': return `${seatName(e.seat)} ${e.kind === 'ming' ? '明杠' : e.kind === 'an' ? '暗杠' : '补杠'} ${tileText(e.tile)}`;
+    case 'gang': {
+      const hiddenOpponentGang = online != null && e.seat !== me && e.kind === 'an' && e.tile.id < 0;
+      const label = e.kind === 'ming' ? '明杠' : e.kind === 'an' ? '暗杠' : '补杠';
+      return `${seatName(e.seat)} ${label}${hiddenOpponentGang ? '' : ` ${tileText(e.tile)}`}`;
+    }
     case 'replacement_drawn': return `${seatName(e.seat)} 杠后补牌`;
     case 'hu': return `${seatName(e.seat)} ${e.kind === 'zimo' ? '自摸' : '点炮'}胡 ${tileText(e.tile)}！`;
     case 'draw_game': return `流局（${e.reason === 'wall_empty' ? '牌墙已空' : '杠后无牌可补'}）`;
@@ -491,7 +532,6 @@ function actionLabel(a: Action, seat: Seat): string {
     case 'choose_flower': return `定花 ${SUIT_TEXT[a.suit]}`;
     case 'peng': return '碰';
     case 'pass': return '过';
-    case 'ready': return '就绪';
     case 'hu': return state.phase === 'act' ? '自摸胡！' : '胡！';
     case 'gang': {
       if (a.tileId != null) {
@@ -550,13 +590,11 @@ function overlayHTML(): string {
       ? result.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
       : `${result.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${result.tile ? tileText(result.tile) : ''}`;
     const hands = ([me, opp] as Seat[])
-      .map((seat) => `<div class="rev"><b>${seatName(seat)}${flowerChip(seat)}</b>${state.hands[seat].filter((tile) => tile.id >= 0).map((tile) => tileFaceHTML(tile, 't-xs')).join('')}</div>`)
+      .map((seat) => `<div class="rev"><b>${seatName(seat)}${flowerChip(seat)}</b>${state.hands[seat].filter((tile) => tile.id >= 0).map((tile) => tileFaceHTML(tile, 't-xs')).join('')}${meldsHTML(seat)}</div>`)
       .join('');
     const resultActions = online
-      ? snapshotIsHost()
-        ? `<button class="abtn hu" data-action="room-rematch" ${online.snapshot?.canRematch ? '' : 'disabled'}>再来一局</button><button class="ghost" data-action="open-room">房间信息</button>`
-        : '<p class="room-waiting">等待房主再来一局</p><button class="ghost" data-action="open-room">房间信息</button>'
-      : '<button class="abtn hu" data-action="local-next">下一局</button>';
+      ? `${renderSettlementActions(snapshotIsHost() ? 'host' : 'player', online.snapshot?.canRematch ?? false)}<button class="ghost" data-action="open-room">房间信息</button>`
+      : renderSettlementActions('local');
     body = `<h2>${title}</h2><p>${sub}</p>${hands}
       <p class="tally">战绩 —— 你 <b>${state.tally.wins[me]}</b> 胜 · 对手 <b>${state.tally.wins[opp]}</b> 胜 · 流局 ${state.tally.draws}</p>
       <div class="room-actions">${resultActions}</div>`;
@@ -639,6 +677,7 @@ function render(): void {
     </main>
     ${flashMsg ? `<div id="toast">${flashMsg}</div>` : ''}
     ${overlayHTML()}
+    ${activeEffect ? `<div class="game-effect ${activeEffect.type}" role="status" aria-live="polite">${activeEffect.message}</div>` : ''}
   `;
 
   document.getElementById('newbtn')!.onclick = newGame;

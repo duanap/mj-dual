@@ -196,4 +196,48 @@ describe('Room 房间与座位绑定', () => {
       vi.useRealTimers();
     }
   });
+
+  it('结算快照亮出双方手牌，但不公开准备状态或 ready 操作', () => {
+    const { room } = mkRoom();
+    startRoom(room);
+    room.state!.phase = 'settlement';
+    room.state!.result = { winner: null, kind: 'draw' };
+    room.state!.ready = [false, false];
+    const snapshot = room.snapshot(0);
+    expect(snapshot.phase).toBe('finished');
+    expect(snapshot.view).not.toBeNull();
+    expect(snapshot.view).not.toHaveProperty('ready');
+    expect(JSON.stringify(snapshot.view!.yourActions)).not.toContain('"ready"');
+    expect(snapshot.view!.reveal?.[1]).toHaveLength(13);
+  });
+
+  it('重开要求当前房主、结算阶段和双方在线', () => {
+    const { room } = mkRoom();
+    startRoom(room);
+    expect(room.rematch(0, 's0')).toMatchObject({ ok: false, code: 'WRONG_PHASE' });
+
+    room.state!.phase = 'settlement';
+    room.state!.result = { winner: 1, kind: 'zimo' };
+    expect(room.rematch(1, 's1')).toMatchObject({ ok: false, code: 'NOT_HOST' });
+    room.bind('s0-new', 0, room.tokens[0]);
+    expect(room.rematch(0, 's0')).toMatchObject({ ok: false, code: 'STALE_SESSION' });
+    room.unbind('s1');
+    expect(room.rematch(0, 's0-new')).toMatchObject({ ok: false, code: 'PLAYER_NOT_CONNECTED' });
+  });
+
+  it('房主一次重开只推进一局，保留累计战绩并由胡牌者坐庄', () => {
+    const { room } = mkRoom();
+    startRoom(room);
+    room.state!.phase = 'settlement';
+    room.state!.result = { winner: 1, kind: 'zimo' };
+    room.state!.tally = { wins: [2, 5], draws: 3 };
+
+    expect(room.rematch(0, 's0')).toEqual({ ok: true });
+    expect(room.state!.phase).toBe('choose_flower');
+    expect(room.state!.round).toBe(2);
+    expect(room.state!.banker).toBe(1);
+    expect(room.state!.tally).toEqual({ wins: [2, 5], draws: 3 });
+    expect(room.state!.ready).toEqual([false, false]);
+    expect(room.rematch(0, 's0')).toMatchObject({ ok: false, code: 'WRONG_PHASE' });
+  });
 });

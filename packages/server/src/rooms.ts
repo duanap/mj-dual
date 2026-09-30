@@ -254,7 +254,7 @@ export class Room {
     if (!this.state) return failure('NOT_STARTED', '房间尚未开始');
     const parsed = normalizeAction(raw);
     if (parsed == null) return { ok: false, code: 'BAD_ACTION', message: '操作格式非法' };
-    const action: Action = parsed.type === 'ready' ? { type: 'ready', seat } : parsed;
+    const action: Action = parsed; // normalizeAction 故意不接受客户端 ready
     if (!isLegal(this.state, seat, action)) {
       return { ok: false, code: 'ILLEGAL_ACTION', message: '当前不允许该操作' };
     }
@@ -300,7 +300,7 @@ export class Room {
       this.state = res.state;
       this.lastEvents = res.events;
     } catch (err) {
-      // 托管建议与就绪都是当前状态下的合法操作；竞态（另一座位同时行动）下静默跳过本轮
+      // 托管建议是当前状态下的合法操作；竞态（另一座位同时行动）下静默跳过本轮
       if (err instanceof RuleError) return;
       throw err;
     }
@@ -323,8 +323,8 @@ export class Room {
 }
 
 function omitReady(view: PlayerView): RoomGameView {
-  const { ready: _ready, ...gameView } = view;
-  return gameView;
+  const { ready: _ready, yourActions, ...gameView } = view;
+  return { ...gameView, yourActions: yourActions.filter((action) => action.type !== 'ready') };
 }
 
 function failure(code: string, message: string): RoomControlResult {

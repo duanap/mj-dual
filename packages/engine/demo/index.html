@@ -91,6 +91,10 @@
   .abtn.choose_flower { background: #326c56; }
   #toast { position: absolute; top: 62px; left: 50%; transform: translateX(-50%); background: #102a25f5; border: 1px solid #ffffff30; padding: 10px 18px; border-radius: 8px; font-size: 13px; z-index: 60; max-width: 90%; pointer-events: none; animation: toastfade 3.2s forwards; }
   @keyframes toastfade { 0%, 75% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+  .game-effect { position: absolute; left: 50%; top: 48%; z-index: 120; transform: translate(-50%, -50%); max-width: min(90%, 520px); padding: 12px 24px; border: 1px solid #f1d47caa; border-radius: 18px; background: #12382df0; color: #ffe8a7; box-shadow: 0 10px 38px #0007, 0 0 28px #e6c77c55; font-size: clamp(22px, 5vw, 42px); font-weight: 800; letter-spacing: 2px; text-align: center; text-shadow: 0 2px 8px #0008; pointer-events: none; animation: game-effect-pop 1.2s ease-out both; }
+  .game-effect.hu { color: #fff2d3; background: #a43b32f2; border-color: #ffca8f; box-shadow: 0 12px 44px #0008, 0 0 42px #f1b75b66; }
+  .game-effect.draw { color: #e2eddf; background: #193e35ed; }
+  @keyframes game-effect-pop { 0% { opacity: 0; transform: translate(-50%, -40%) scale(.72); } 16%, 72% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, -62%) scale(1.04); } }
   #logpanel { position: absolute; right: 24px; top: 64px; width: 280px; max-height: 65%; overflow-y: auto; background: #102a25f5; border: 1px solid #ffffff25; border-radius: 9px; padding: 12px; font-size: 12px; line-height: 1.9; z-index: 30; }
   #logpanel.hidden { display: none; }
   .overlay { position: absolute; inset: 0; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: #061d17bf; display: flex; align-items: center; justify-content: center; z-index: 100; }
@@ -115,6 +119,8 @@
   .records-list { max-height: min(52vh, 420px); overflow: auto; text-align: left; }
   .records-list p { margin: 5px 0; padding: 5px 8px; border-bottom: 1px solid #e1e9e2; }
   .result-card .rev { gap: 2px; }
+  .result-card { animation: result-enter .32s ease-out both; }
+  @keyframes result-enter { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
   .card h2 { font-size: 24px; margin: 0 0 12px; font-weight: 700; }
   .card p { font-size: 14px; margin: 8px 0; }
   .card .dim { color: #607267; font-size: 13px; }
