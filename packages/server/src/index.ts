@@ -51,7 +51,7 @@ export function createApp() {
 // 直接运行（被测试导入时不监听）
 if (process.env.MJ_NO_LISTEN !== '1') {
   const app = createApp();
-  app.httpServer.listen(PORT, () => {
+  app.httpServer.listen({ port: PORT, host: process.env.HOST }, () => {
     console.log(`联机服务: http://localhost:${PORT}（前端同源托管；超时托管 ${AUTO_MS}ms）`);
   });
 }
