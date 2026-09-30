@@ -10,7 +10,7 @@ function mkRoom(autoMs = 20_000) {
     autoMs,
     rngFactory: () => mulberry32(42),
   });
-  const lastView = (seat: 0 | 1) => [...sent].reverse().find((s) => s.seat === seat && s.event === 'state')!.payload;
+  const lastView = (seat: 0 | 1) => [...sent].reverse().find((s) => s.seat === seat && s.event === 'room:snapshot')!.payload.view;
   return { room, sent, lastView };
 }
 

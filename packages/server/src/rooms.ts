@@ -39,9 +39,6 @@ function normalizeAction(raw: unknown): Action | null {
       return { type: 'hu' };
     case 'pass':
       return { type: 'pass' };
-    case 'ready':
-      // 座位由服务端盖章，客户端携带的 seat 一律忽略
-      return { type: 'ready', seat: 0 };
     case 'choose_flower':
       return a.suit === 'tong' || a.suit === 'tiao' ? { type: 'choose_flower', suit: a.suit as Suit } : null;
     case 'gang': {
@@ -66,9 +63,8 @@ function sameAction(a: Action, b: Action): boolean {
   return true;
 }
 
-/** 是否该座位当前可发的合法操作（ready 由服务端按座位另判） */
+/** 是否该座位当前可发的合法操作。 */
 function isLegal(state: GameState, seat: Seat, action: Action): boolean {
-  if (action.type === 'ready') return state.phase === 'settlement' && !state.ready[seat];
   if (!currentActors(state).includes(seat)) return false;
   return availableActions(state, seat).some((a) => sameAction(a, action));
 }
@@ -154,6 +150,33 @@ export class Room {
     return { ok: true };
   }
 
+  rematch(seat: Seat, sid: string): RoomControlResult {
+    const auth = this.authorizeHost(seat, sid);
+    if (!auth.ok) return auth;
+    if (!this.state || this.state.phase !== 'settlement') return failure('WRONG_PHASE', '本局尚未结束');
+    if (!this.connected(1)) return failure('PLAYER_NOT_CONNECTED', '等待玩家重新连接');
+
+    let nextState = this.state;
+    let events: GameEvent[] = [];
+    try {
+      for (const readySeat of [0, 1] as const) {
+        if (nextState.ready[readySeat]) continue;
+        const res = applyAction(nextState, { type: 'ready', seat: readySeat }, this.rng);
+        nextState = res.state;
+        events = res.events;
+      }
+    } catch (err) {
+      if (err instanceof RuleError) return { ok: false, code: err.code, message: err.message };
+      throw err;
+    }
+
+    this.state = nextState;
+    this.lastEvents = events;
+    this.pushState();
+    this.armAuto();
+    return { ok: true };
+  }
+
   private authorizeHost(seat: Seat, sid: string): RoomControlResult {
     if (seat !== 0) return failure('NOT_HOST', '只有房主可以执行此操作');
     if (this.sids[0] !== sid) return failure('STALE_SESSION', '房间连接已失效');
@@ -221,7 +244,6 @@ export class Room {
     for (const seat of [0, 1] as const) {
       if (this.sids[seat] == null) continue;
       this.send(seat, 'room:snapshot', this.snapshot(seat));
-      if (this.state) this.send(seat, 'state', this.view(seat));
     }
     this.lastEvents = []; // 事件只随首次推送携带，成员变动等后续推送不再重发（防客户端日志/音效重复）
   }
@@ -322,6 +344,13 @@ export class RoomManager {
 
   get(code: string): Room | undefined {
     return this.rooms.get(code);
+  }
+
+  remove(room: Room): boolean {
+    if (this.rooms.get(room.code) !== room) return false;
+    room.dispose();
+    this.rooms.delete(room.code);
+    return true;
   }
 
   create(send: SendFn, opts: RoomOptions = {}): Room {

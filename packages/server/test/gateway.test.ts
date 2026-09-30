@@ -1,5 +1,5 @@
-// 网关集成测试：真实 Socket.IO 双客户端走完整协议（创建/加入/视图过滤/非法意图/token 重连）。
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+// Gateway integration coverage uses real Socket.IO clients and server sessions.
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { Server as IoServer } from 'socket.io';
 import { io, type Socket } from 'socket.io-client';
@@ -9,14 +9,18 @@ import { attachGateway } from '../src/gateway';
 
 let httpServer: HttpServer;
 let ioServer: IoServer;
+let manager: RoomManager;
 let baseUrl: string;
+const sockets: Socket[] = [];
 
-const AUTO_MS = 400;
+const AUTO_MS = 60_000;
 const connect = (): Promise<Socket> => {
-  const s = io(baseUrl, { transports: ['websocket'] });
+  const s = io(baseUrl, { transports: ['websocket'], auth: { protocol: 2 }, autoConnect: false });
+  sockets.push(s);
   return new Promise((res, rej) => {
     s.once('connect', () => res(s));
     s.once('connect_error', rej);
+    s.connect();
   });
 };
 
@@ -24,102 +28,144 @@ function once<T = any>(socket: Socket, event: string): Promise<T> {
   return new Promise((res) => socket.once(event, res));
 }
 
+function ack<T = any>(socket: Socket, event: string, ...args: unknown[]): Promise<T> {
+  return new Promise((res) => socket.emit(event, ...args, res));
+}
+
 beforeAll(async () => {
   httpServer = createHttpServer();
   ioServer = new IoServer(httpServer, { serveClient: false });
-  attachGateway(ioServer, new RoomManager(), { autoMs: AUTO_MS, rngFactory: () => mulberry32(7) });
+  manager = new RoomManager();
+  attachGateway(ioServer, manager, { autoMs: AUTO_MS, rngFactory: () => mulberry32(7) });
   await new Promise<void>((res) => httpServer.listen(0, () => res()));
   const addr = httpServer.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
   baseUrl = `http://localhost:${port}`;
 });
 
+afterEach(() => {
+  for (const room of manager.all()) manager.remove(room);
+  for (const socket of sockets.splice(0)) socket.disconnect();
+});
+
 afterAll(async () => {
+  for (const socket of sockets) socket.disconnect();
   ioServer.close();
   await new Promise<void>((res) => httpServer.close(() => res()));
-});describe('联机协议（双客户端）', () => {
-  it('创建→加入→双方收到按视角过滤的状态；非法意图被拒；重连恢复', async () => {
-    const a = await connect();
-    const b = await connect();
+});
 
-    const createRes: any = await new Promise((res) => a.emit('room:create', res));
-    expect(createRes.error).toBeUndefined();
-    expect(createRes.seat).toBe(0);
-    expect(createRes.code).toMatch(/^[A-Z2-9]{4}$/);
-    const code: string = createRes.code;
+describe('联机协议（双客户端）', () => {
+  it('等待快照、房主开局、重开、主动退出、旧 token 撤销与解散', async () => {
+    const host = await connect();
+    const player = await connect();
 
-    // 重复创建被拒
-    const dup: any = await new Promise((res) => a.emit('room:create', res));
-    expect(dup.error).toBe('ALREADY_IN_ROOM');
+    const created: any = await ack(host, 'room:create');
+    expect(created.error).toBeUndefined();
+    expect(created.seat).toBe(0);
+    expect(created.code).toMatch(/^[A-Z2-9]{4}$/);
+    expect(created.snapshot).toMatchObject({ phase: 'waiting', you: 0, host: 0, view: null, canStart: false });
+    expect(created.snapshot).not.toHaveProperty('token');
+    const code: string = created.code;
 
-    // 错误房间号
-    const bad: any = await new Promise((res) => b.emit('room:join', { code: 'ZZZZ' }, res));
-    expect(bad.error).toBe('NO_ROOM');
+    const waitingAction: any = await ack(host, 'action', { type: 'discard', tileId: 1 });
+    expect(waitingAction).toMatchObject({ ok: false, code: 'NOT_STARTED' });
 
-    // 正常加入：双方都收到对手在场事件
-    const stateA0 = once<any>(a, 'state');
-    const peerB: any = once(b, 'room:peer');
-    const joinRes: any = await new Promise((res) => b.emit('room:join', { code }, res));
-    expect(joinRes.error).toBeUndefined();
-    expect(joinRes.seat).toBe(1);
-    const peer = await peerB;
-    expect(peer).toMatchObject({ seat: 0, connected: true });
-    const sa0 = await stateA0;
+    const hostWaiting = once<any>(host, 'room:snapshot');
+    const playerWaiting = once<any>(player, 'room:snapshot');
+    const peerOnline = once<any>(host, 'room:peer');
+    const joined: any = await ack(player, 'room:join', { code });
+    expect(joined.error).toBeUndefined();
+    expect(joined).toMatchObject({ seat: 1, snapshot: { phase: 'waiting', you: 1, view: null } });
+    expect((await hostWaiting).members[1].connected).toBe(true);
+    expect((await playerWaiting).members[0].connected).toBe(true);
+    expect(await peerOnline).toMatchObject({ seat: 1, connected: true });
 
-    // 视角过滤：各自只拿到自己的手牌与对手数量；牌墙只有数量
-    const createView = createRes.view;
-    expect(createView.hand.length).toBeGreaterThan(0);
-    expect(createView).not.toHaveProperty('wall');
-    expect(createView.otherHandCount).toBe(13);
-    const bView: any = joinRes.view;
-    expect(bView.hand.length).toBe(bView.you === joinRes.seat ? bView.hand.length : 0); // 结构存在
-    expect(bView.otherHandCount).toBe(14);
-    // 对手手牌数组不外发：视图上没有对手 hands 字段
-    expect(bView).not.toHaveProperty('hands');
+    const outsider = await connect();
+    expect(await ack(outsider, 'room:info')).toMatchObject({ ok: false, code: 'NO_ROOM' });
 
-    // 未行动方发牌 → 拒
-    const stateNow: any = await new Promise((res) => {
-      b.once('state', res);
-      // 触发一次快照：让 b 发一个必被拒的意图，确认拒绝且状态不变
-      b.emit('action', { type: 'discard', tileId: 999 }, (r: any) => {
-        expect(r.ok).toBe(false);
-        res(r);
-      });
+    for (const event of ['room:start', 'room:dissolve', 'room:rematch']) {
+      expect(await ack(player, event)).toMatchObject({ ok: false, code: 'NOT_HOST' });
+    }
+
+    const startedHost = once<any>(host, 'room:snapshot');
+    const startedPlayer = once<any>(player, 'room:snapshot');
+    expect(await ack(host, 'room:start')).toMatchObject({ ok: true, snapshot: { phase: 'playing' } });
+    expect((await startedHost).view.phase).toBe('choose_flower');
+    expect((await startedPlayer).view.phase).toBe('choose_flower');
+    expect((await ack(host, 'room:info')).snapshot).toMatchObject({ phase: 'playing', canStart: false });
+
+    // A v2 client cannot use the old ready action as a substitute for host rematch.
+    const internalRoom = manager.get(code)!;
+    internalRoom.state!.phase = 'settlement';
+    internalRoom.state!.result = { winner: null, kind: 'draw' };
+    internalRoom.pushState();
+    const finishedHost: any = await once(host, 'room:snapshot');
+    expect(finishedHost.phase).toBe('finished');
+    expect(finishedHost.view.reveal).not.toBeNull();
+    expect(finishedHost.view).not.toHaveProperty('ready');
+    const ready: any = await ack(player, 'action', { type: 'ready', seat: 0 });
+    expect(ready).toMatchObject({ ok: false });
+    expect(internalRoom.state!.phase).toBe('settlement');
+
+    const rematchHost = once<any>(host, 'room:snapshot');
+    const rematchPlayer = once<any>(player, 'room:snapshot');
+    expect(await ack(host, 'room:rematch')).toMatchObject({ ok: true, snapshot: { phase: 'playing' } });
+    expect((await rematchHost).round).toBe(2);
+    expect((await rematchPlayer).phase).toBe('playing');
+    expect(await ack(host, 'room:rematch')).toMatchObject({ ok: false, code: 'WRONG_PHASE' });
+
+    const leftHost = once<any>(host, 'room:snapshot');
+    const playerClosed = once<any>(player, 'room:closed');
+    expect(await ack(player, 'room:leave')).toMatchObject({ ok: true });
+    expect(await playerClosed).toMatchObject({ code, reason: 'left' });
+    expect(await leftHost).toMatchObject({ phase: 'waiting', members: [{ connected: true }, { connected: false }], view: null });
+    expect(await ack(player, 'room:rejoin', { code, token: joined.token })).toMatchObject({ error: 'BAD_TOKEN' });
+
+    const replacement = await connect();
+    const replacementJoin: any = await ack(replacement, 'room:join', { code });
+    expect(replacementJoin).toMatchObject({ seat: 1, snapshot: { phase: 'waiting' } });
+    expect(await ack(replacement, 'room:start')).toMatchObject({ ok: false, code: 'NOT_HOST' });
+
+    const closedHost = once<any>(host, 'room:closed');
+    const closedPlayer = once<any>(replacement, 'room:closed');
+    expect(await ack(host, 'room:dissolve')).toMatchObject({ ok: true });
+    expect(await closedHost).toMatchObject({ code, reason: 'dissolved' });
+    expect(await closedPlayer).toMatchObject({ code, reason: 'dissolved' });
+    expect(manager.size()).toBe(0);
+    expect(await ack(replacement, 'action', { type: 'discard', tileId: 1 })).toMatchObject({ ok: false, code: 'NO_ROOM' });
+  });
+
+  it('凭 token 重连恢复座位与本座位视图', async () => {
+    const host = await connect();
+    const created: any = await ack(host, 'room:create');
+    const player = await connect();
+    const joined: any = await ack(player, 'room:join', { code: created.code });
+    const hostStarted = once<any>(host, 'room:snapshot');
+    const playerStarted = once<any>(player, 'room:snapshot');
+    await ack(host, 'room:start');
+    await hostStarted;
+    await playerStarted;
+
+    player.disconnect();
+    const reconnected = await connect();
+    const restored: any = await ack(reconnected, 'room:rejoin', { code: created.code, token: joined.token });
+    expect(restored.error).toBeUndefined();
+    expect(restored).toMatchObject({ seat: 1, snapshot: { you: 1, phase: 'playing' } });
+    expect(restored.snapshot.view.hand).toHaveLength(13);
+  });
+
+  it('旧协议连接只收到明确的刷新提示，不注册旧房间动作', async () => {
+    const old = io(baseUrl, { transports: ['websocket'], auth: { protocol: 1 }, autoConnect: false });
+    sockets.push(old);
+    const prompt = once<any>(old, 'protocol:upgrade-required');
+    const disconnected = once<any>(old, 'disconnect');
+    await new Promise<void>((res, rej) => {
+      old.once('connect', res);
+      old.once('connect_error', rej);
+      old.connect();
     });
-    expect(stateNow.ok).toBe(false);
-
-    // 等超时托管把牌局推进几步（AUTO_MS=400，推进到有行动方为庄家的回合）
-    const viewBy = (s: Socket) =>
-      new Promise<any>((res) => s.once('state', (v: any) => res(v)));
-    let last: any = await viewBy(a);
-    for (let i = 0; i < 30 && last.seq < 3; i++) last = await viewBy(a);
-
-    // a 断线 → 凭 token 重连 → 恢复视图
-    const peerA: any = once(a, 'room:peer');
-    const stateA1 = once<any>(a, 'state');
-    a.disconnect();
-    a.connect();
-    await new Promise<void>((res) => a.once('connect', res));
-    const reRes: any = await new Promise((res) =>
-      a.emit('room:rejoin', { code, token: createRes.token }, res),
-    );
-    expect(reRes.error).toBeUndefined();
-    expect(reRes.seat).toBe(0);
-    expect(reRes.view.seq).toBeGreaterThan(0);
-    expect(await stateA1).toBeTruthy();
-    void peerA;
-
-    // 伪造 token 被拒
-    const forged: any = await new Promise((res) => {
-      const c = io(baseUrl, { transports: ['websocket'] });
-      c.once('connect', () => c.emit('room:rejoin', { code, token: 'forged-token' }, (r: any) => {
-        c.disconnect();
-        res(r);
-      }));
-    });
-    expect(forged.error).toBe('BAD_TOKEN');
-
-    a.disconnect();
-    b.disconnect();
+    expect(await prompt).toMatchObject({ code: 'CLIENT_UPDATE_REQUIRED' });
+    await disconnected;
+    expect(manager.size()).toBe(0);
   });
 });
