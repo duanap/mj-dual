@@ -507,8 +507,8 @@ function render(): void {
           <span class="gang-progress">${state.melds[me].filter((m) => m.type === 'gang').length >= 2 ? '已达两杠 · 可按牌型胡牌' : `${state.melds[me].filter((m) => m.type === 'gang').length} / 2 杠 · 两杠起胡`}</span>
           <span class="melds">${meldsHTML(me)}</span>
         </div>
+        <div class="actionbar" role="group" aria-label="对局操作">${abtns || '<span class="action-note">' + (state.phase === 'act' && state.turn === me ? '选中后再次点击出牌' : '等待对手操作') + '</span>'}</div>
         <div class="hand-area"><div class="hand${dealing ? ' dealing' : ''}" style="--hand-count:${Math.max(1, state.hands[me].length)}">${handHTML(me, dealing)}</div></div>
-        <footer class="actionbar">${abtns || '<span class="action-note">' + (state.phase === 'act' && state.turn === me ? '选中后再次点击出牌' : '等待对手操作') + '</span>'}</footer>
       </section>
     </main>
     <aside id="logpanel" class="hidden">${history.map((h) => `<div>${h}</div>`).join('')}</aside>
