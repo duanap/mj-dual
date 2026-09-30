@@ -1,0 +1,6 @@
+Face symbols recreated as scalable SVG to follow the user-supplied mahjong reference image in this chat.
+Reference: 666x255 screenshot provided by the user, featuring bamboo on the upper row and circles on the lower row.
+Design: dark-green concentric circles, red accent groups, solid segmented bamboo, paired zigzag eight-bamboo, simple bird one-bamboo.
+No external image-generation model was used. The low-resolution screenshot is not embedded in game assets.
+Pin = 筒; Sou = 条. Files are ordered by ranks 1 through 9.
+The existing CC0 tile body (assets/tiles/Front.svg) is retained separately; its source and license remain in assets/tiles/.
