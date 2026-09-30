@@ -295,7 +295,14 @@ function handHTML(seat: Seat, dealing: boolean): string {
   const hand = state.hands[seat];
   if (seat === opp) {
     const reveal = state.phase === 'settlement';
-    return hand.map((t) => (reveal && t.id > 0 ? tileFaceHTML(t, 't-sm') : backHTML('t-sm'))).join('');
+    return hand
+      .map((t, i) => {
+        const delay = dealing ? ` style="animation-delay:${i * 28}ms"` : '';
+        return reveal && t.id > 0
+          ? tileFaceHTML(t, 't-sm')
+          : `<span class="twrap"${delay}>${backHTML('t-sm')}</span>`;
+      })
+      .join('');
   }
   const canPlay = state.phase === 'act' && state.turn === me && yourActions.some((a) => a.type === 'discard');
   return hand
@@ -321,8 +328,11 @@ function meldsHTML(seat: Seat): string {
 }
 
 function riverHTML(seat: Seat): string {
-  const r = state.rivers[seat];
-  return r.map((t, i) => tileFaceHTML(t, 't-sm', i === r.length - 1 ? 'latest' : '')).join('');
+  const all = state.rivers[seat];
+  // 手机横屏（矮视口）只保留最近 6 张，避免中央区溢出
+  const compact = window.matchMedia('(orientation: landscape) and (max-height: 560px)').matches;
+  const r = compact ? all.slice(-6) : all;
+  return r.map((t, i) => tileFaceHTML(t, 't-sm', i === r.length - 1 && all.length > 0 ? 'latest' : '')).join('');
 }
 
 function actionLabel(a: Action, seat: Seat): string {
@@ -424,18 +434,18 @@ function render(): void {
           <span class="plate"><b class="pdot"></b>对手 ${flowerChip(opp)}${state.banker === opp ? '<em>庄</em>' : ''}</span>
           <span class="melds">${meldsHTML(opp)}</span>
         </div>
-        <div class="tray"><div class="river">${riverHTML(opp)}</div></div>
-        <div class="backs">${handHTML(opp, false)}</div>
+        <div class="backs${dealing ? ' dealing' : ''}">${handHTML(opp, dealing)}</div>
       </section>
       <section class="center">
-        <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
+        <div class="tray" data-label="对手牌河"><div class="river">${riverHTML(opp)}</div></div>
         <div class="mid">
+          <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
           <span class="hint">${phaseHint()}</span>
           ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
         </div>
+        <div class="tray" data-label="你的牌河"><div class="river">${riverHTML(me)}</div></div>
       </section>
       <section class="zone me${currentActors(state).includes(me) ? ' turn' : ''}">
-        <div class="tray"><div class="river">${riverHTML(me)}</div></div>
         <div class="meta">
           <span class="plate"><b class="pdot"></b>你 ${flowerChip(me)}${state.banker === me ? '<em>庄</em>' : ''}</span>
           <span class="melds">${meldsHTML(me)}</span>
