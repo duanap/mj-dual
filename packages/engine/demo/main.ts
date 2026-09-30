@@ -2,11 +2,13 @@
 // 规则全部由 packages/engine 纯函数引擎校验。联机遵循架构文档：客户端只发意图，
 // 座位由服务端分配，状态由服务端按玩家视角过滤后下发（PlayerView）。
 import { io, type Socket } from 'socket.io-client';
-import type { Action, GameEvent, GameState, PlayerView, RNG, Seat, Tile } from '../src/index';
+import type { Action, GameEvent, GameState, RNG, Seat, Tile } from '../src/index';
 import { applyAction, availableActions, currentActors, newMatch, suggestAction } from '../src/index';
+import type { RoomGameView, RoomSnapshot } from '../../server/src/protocol';
 import { backHTML, tileFaceHTML, tileText } from './tiles';
 import { isMuted, setMuted, sfx } from './audio';
 import { DiscardSelection, discardTargets } from './selection';
+import { renderRoomDialog } from './room-ui';
 
 // 浏览器 CSPRNG：crypto.getRandomValues + 拒绝采样（与生产随机源纪律一致）
 const rng: RNG = {
@@ -28,12 +30,16 @@ let gen = 0; // 本地 AI 定时器代数
 let history: string[] = [];
 let lastDiscard: Tile | null = null;
 let lastRound = -1;
+let localResultRound = -1;
 let flashMsg = '';
-let menuOpen = false; // 联机菜单（暂停本地对局）
+type ModalKind = 'room' | 'river' | 'records' | 'settlement';
+let modal: ModalKind | null = null;
+let modalReturnFocusId: string | null = null;
+let onlineError = '';
+let roomRequestPending = false;
 let yourActions: Action[] = [];
 const selection = new DiscardSelection();
 let discardMap = new Map<number, number>();
-let riverOpen = false;
 const selectionContext = (): string => `${online?.code ?? `local:${gen}`}:${state.round}:${state.seq}`;
 const legalDiscards = (): number[] => [...discardMap.keys()];
 
@@ -41,9 +47,12 @@ interface Online {
   socket: Socket;
   code: string;
   token: string;
+  snapshot: RoomSnapshot | null;
+  roomError: string;
+  pendingControl: boolean;
 }
 let online: Online | null = null;
-let view: PlayerView | null = null;
+let view: RoomGameView | null = null;
 
 const SUIT_TEXT = { tong: '筒', tiao: '条' } as const;
 const seatName = (s: Seat): string => (s === me ? '你' : '对手');
@@ -56,7 +65,7 @@ const flowerChip = (s: Seat): string => {
 
 function goLocal(): void {
   selection.reset();
-  riverOpen = false;
+  modal = null;
   if (online) {
     online.socket.disconnect();
     online = null;
@@ -74,7 +83,7 @@ function goLocal(): void {
   scheduleNext();
 }
 
-function viewToState(v: PlayerView): GameState {
+function viewToState(v: RoomGameView): GameState {
   const other = (1 - v.you) as Seat;
   const ph = (i: number): Tile => ({ id: -10000 - i, suit: 'tong', rank: 1 });
   const otherHand = v.reveal ? v.reveal[other] : Array.from({ length: v.otherHandCount }, (_, i) => ph(i));
@@ -92,7 +101,7 @@ function viewToState(v: PlayerView): GameState {
     claimable: false,
     pending: v.pending,
     passTiles: v.you === 0 ? [v.passTiles, []] : [[], v.passTiles],
-    ready: v.ready,
+    ready: [false, false],
     result: v.result,
     tally: v.tally,
     seq: v.seq,
@@ -107,19 +116,25 @@ function consumeEvents(events: GameEvent[]): void {
   if (history.length > 120) history.length = 120;
 }
 
-function onState(v: PlayerView): void {
-  view = v;
-  me = v.you;
-  opp = (1 - v.you) as Seat;
-  consumeEvents(v.events);
-  state = viewToState(v);
-  if (state.phase === 'settlement') riverOpen = false;
+function onRoomSnapshot(snapshot: RoomSnapshot): void {
+  if (!online || online.code !== snapshot.code) return;
+  const previousPhase = online.snapshot?.phase ?? null;
+  online.snapshot = snapshot;
+  me = snapshot.you;
+  opp = (1 - snapshot.you) as Seat;
+  if (snapshot.view) {
+    view = snapshot.view;
+    consumeEvents(snapshot.view.events);
+    state = viewToState(snapshot.view);
+  }
+  if (snapshot.phase === 'finished' && previousPhase !== 'finished') modal = 'settlement';
+  if ((previousPhase === 'waiting' || previousPhase === 'finished') && snapshot.phase === 'playing') modal = null;
   render();
 }
 
 function connectOnline(): Socket {
-  const socket = io({ reconnectionAttempts: 5, transports: ['websocket', 'polling'] });
-  socket.on('state', onState);
+  const socket = io({ reconnectionAttempts: 5, transports: ['websocket', 'polling'], auth: { protocol: 2 } });
+  socket.on('room:snapshot', onRoomSnapshot);
   socket.on('room:peer', (p: { seat: Seat; connected: boolean }) => {
     flash(p.connected ? '对手已上线' : '对手掉线，自动托管中');
     render();
@@ -128,6 +143,20 @@ function connectOnline(): Socket {
     flash('对局已在其他页面打开，本页返回人机模式');
     goLocal();
   });
+  socket.on('room:closed', (closed: { code: string; reason: string }) => {
+    if (!online || online.code !== closed.code) return;
+    goLocal();
+    flash(closed.reason === 'dissolved' ? '房间已解散' : '已退出房间');
+    render();
+  });
+  socket.on('protocol:upgrade-required', (result: { message?: string }) => {
+    sessionStorage.removeItem('mj-room');
+    if (online?.socket === socket) online = null;
+    view = null;
+    modal = null;
+    flash(result.message ?? '页面已更新，请刷新后重新加入房间');
+    render();
+  });
   socket.on('disconnect', () => {
     if (online) {
       flash('连接断开，正在重连…');
@@ -135,7 +164,9 @@ function connectOnline(): Socket {
     }
   });
   socket.on('connect_error', () => {
-    if (!online && !menuOpen) {
+    if (!online) {
+      roomRequestPending = false;
+      onlineError = '联机服务不可用，请稍后重试';
       flash('联机服务不可用（请确认服务端已启动：npm run server）');
       render();
     }
@@ -143,44 +174,127 @@ function connectOnline(): Socket {
   return socket;
 }
 
-function applyJoined(socket: Socket, res: any): void {
+function applyJoined(socket: Socket, res: any, showRoom = true): void {
+  roomRequestPending = false;
   if (res.error) {
+    socket.disconnect();
     sessionStorage.removeItem('mj-room');
     flash(`加入失败：${res.error}`);
-    menuOpen = true;
+    onlineError = res.message ?? res.error;
+    modal = 'room';
     render();
     return;
   }
-  menuOpen = false;
   gen++; // 停掉本地 AI
-  online = { socket, code: res.code, token: res.token };
+  onlineError = '';
+  online = { socket, code: res.code, token: res.token, snapshot: null, roomError: '', pendingControl: false };
   sessionStorage.setItem('mj-room', JSON.stringify({ code: res.code, token: res.token }));
-  onState(res.view);
+  onRoomSnapshot(res.snapshot);
+  if ((showRoom || res.snapshot.phase === 'waiting') && res.snapshot.phase !== 'finished') modal = 'room';
+  render();
 }
 
 function createRoom(): void {
+  if (roomRequestPending) return;
+  roomRequestPending = true;
+  onlineError = '';
   const socket = connectOnline();
   flash('正在创建房间…');
   render();
   socket.once('connect', () => {
-    socket.emit('room:create', (res: any) => applyJoined(socket, res));
+    socket.timeout(5000).emit('room:create', (err: Error | null, res: any) =>
+      applyJoined(socket, err ? { error: 'REQUEST_TIMEOUT', message: '创建请求超时' } : res),
+    );
   });
 }
 
 function joinRoom(code: string): void {
+  if (roomRequestPending) return;
+  roomRequestPending = true;
+  onlineError = '';
   const socket = connectOnline();
   flash('正在加入房间…');
   render();
   socket.once('connect', () => {
-    socket.emit('room:join', { code }, (res: any) => applyJoined(socket, res));
+    socket.timeout(5000).emit('room:join', { code }, (err: Error | null, res: any) =>
+      applyJoined(socket, err ? { error: 'REQUEST_TIMEOUT', message: '加入请求超时' } : res),
+    );
   });
 }
 
 function rejoin(code: string, token: string): void {
   const socket = connectOnline();
   socket.once('connect', () => {
-    socket.emit('room:rejoin', { code, token }, (res: any) => applyJoined(socket, res));
+    socket.timeout(5000).emit('room:rejoin', { code, token }, (err: Error | null, res: any) =>
+      applyJoined(socket, err ? { error: 'REQUEST_TIMEOUT', message: '重连超时' } : res, false),
+    );
   });
+}
+
+function openModal(kind: ModalKind): void {
+  if (modal == null) modalReturnFocusId = (document.activeElement as HTMLElement | null)?.id || 'roombtn';
+  modal = kind;
+  render();
+  if (kind === 'room' && online?.socket.connected) {
+    online.socket.timeout(5000).emit('room:info', (err: Error | null, result: any) => {
+      if (!online || online.socket.connected === false) return;
+      if (err || !result?.ok) online.roomError = err ? '获取房间信息超时' : result?.message ?? '获取房间信息失败';
+      else {
+        online.roomError = '';
+        if (result.snapshot) onRoomSnapshot(result.snapshot);
+      }
+      render();
+    });
+  }
+}
+
+function closeModal(): void {
+  if (!modal) return;
+  const returnFocus = modalReturnFocusId;
+  modal = null;
+  modalReturnFocusId = null;
+  render();
+  if (returnFocus) document.getElementById(returnFocus)?.focus({ preventScroll: true });
+  if (!online) scheduleNext();
+}
+
+function joinFromDialog(): void {
+  const code = (document.getElementById('room-code') as HTMLInputElement | null)?.value.trim().toUpperCase() ?? '';
+  if (code.length === 4) joinRoom(code);
+}
+
+function roomControl(action: 'start' | 'leave' | 'dissolve' | 'rematch'): void {
+  const current = online;
+  if (!current || current.pendingControl) return;
+  current.pendingControl = true;
+  current.roomError = '';
+  render();
+  current.socket.timeout(5000).emit(`room:${action}`, (err: Error | null, result: any) => {
+    if (online !== current) return;
+    current.pendingControl = false;
+    if (err || !result?.ok) {
+      current.roomError = err ? '操作确认超时，请检查房间状态后重试' : result?.message ?? '房间操作失败';
+      render();
+      return;
+    }
+    current.roomError = '';
+    if (result.snapshot) onRoomSnapshot(result.snapshot);
+    if (action === 'start' || action === 'rematch') modal = null;
+    render();
+  });
+}
+
+function handleModalAction(action: string): void {
+  switch (action) {
+    case 'room-create': createRoom(); break;
+    case 'room-join': joinFromDialog(); break;
+    case 'room-start': roomControl('start'); break;
+    case 'room-rematch': roomControl('rematch'); break;
+    case 'room-leave': roomControl('leave'); break;
+    case 'room-dissolve': roomControl('dissolve'); break;
+    case 'open-room': openModal('room'); break;
+    case 'local-next': doAction({ type: 'ready', seat: me }); break;
+  }
 }
 
 // 页面加载：有保存的房间则自动重连
@@ -235,7 +349,7 @@ function applyLocal(a: Action): void {
 }
 
 function scheduleNext(): void {
-  if (online || menuOpen) return; // 联机由服务端驱动；菜单打开时暂停本地对局
+  if (online || modal) return; // 联机由服务端驱动；弹窗打开时暂停本地对局
   const myGen = gen;
   if (state.phase === 'settlement') {
     if (currentActors(state).includes(opp)) {
@@ -247,7 +361,7 @@ function scheduleNext(): void {
   }
   if (currentActors(state).includes(opp)) {
     setTimeout(() => {
-      if (myGen !== gen || menuOpen) return;
+      if (myGen !== gen || modal) return;
       applyLocal(suggestAction(state, opp, rng));
     }, state.phase === 'respond' ? 950 : 720);
   }
@@ -257,7 +371,7 @@ function newGame(): void {
   if (online) return;
   gen++;
   selection.reset();
-  riverOpen = false;
+  modal = null;
   state = newMatch(rng);
   history = [];
   lastDiscard = null;
@@ -318,6 +432,7 @@ function flash(msg: string): void {
 /* ---------------- 渲染 ---------------- */
 
 function handHTML(seat: Seat, dealing: boolean): string {
+  if (online && !view) return '';
   const hand = state.hands[seat];
   if (seat === opp) {
     const reveal = state.phase === 'settlement';
@@ -351,10 +466,11 @@ function handHTML(seat: Seat, dealing: boolean): string {
 }
 
 function meldsHTML(seat: Seat): string {
+  if (online && !view) return '';
   return state.melds[seat]
     .map((m) => {
       const label = m.type === 'peng' ? '碰' : m.concealed ? '暗杠' : m.upgraded ? '补杠' : '明杠';
-      const hide = seat === opp && m.concealed; // 暗杠对对手保密
+      const hide = seat === opp && m.concealed && state.phase !== 'settlement'; // 结算亮牌
       const tiles = m.tiles.map((t) => (hide || t.id < 0 ? backHTML('t-xs') : tileFaceHTML(t, 't-xs'))).join('');
       return `<span class="meld">${tiles}<i>${label}</i></span>`;
     })
@@ -362,6 +478,7 @@ function meldsHTML(seat: Seat): string {
 }
 
 function riverHTML(seat: Seat, full = false): string {
+  if (online && !view) return '';
   const all = state.rivers[seat];
   // 手机横屏（矮视口）只保留最近 6 张，避免中央区溢出
   const compact = Math.min(window.innerWidth, window.innerHeight) <= 560;
@@ -388,6 +505,9 @@ function actionLabel(a: Action, seat: Seat): string {
 }
 
 function phaseHint(): string {
+  if (online && !view) {
+    return online.snapshot?.members[1].connected ? '等待房主开始对局' : '等待玩家加入房间';
+  }
   switch (state.phase) {
     case 'choose_flower': return state.turn === me ? '请选择你的花色（定花）' : '对手正在定花…';
     case 'act': {
@@ -405,54 +525,62 @@ function phaseHint(): string {
 }
 
 function overlayHTML(): string {
-  if (riverOpen && !menuOpen && state.phase !== 'settlement') {
-    return `<div class="overlay"><div class="card river-card" role="dialog" aria-modal="true" aria-labelledby="river-title">
-      <div class="dialog-head"><h2 id="river-title">完整牌河</h2><button id="closeriver" class="ghost" aria-label="关闭完整牌河">关闭</button></div>
-      <div class="river-history"><h3>对手 · ${state.rivers[opp].length} 张</h3><div class="river full">${riverHTML(opp, true)}</div>
-      <h3>你 · ${state.rivers[me].length} 张</h3><div class="river full">${riverHTML(me, true)}</div></div>
-    </div></div>`;
+  if (!modal) return '';
+  let body = '';
+  let label = '对话框';
+  let className = '';
+  if (modal === 'room') {
+    label = '房间';
+    body = renderRoomDialog(online?.snapshot ?? null, online?.roomError || onlineError);
+  } else if (modal === 'river') {
+    label = '完整牌河';
+    className = 'river-card';
+    body = `<h2>完整牌河</h2><div class="river-history">
+      <h3>对手 · ${state.rivers[opp].length} 张</h3><div class="river full">${riverHTML(opp, true)}</div>
+      <h3>你 · ${state.rivers[me].length} 张</h3><div class="river full">${riverHTML(me, true)}</div></div>`;
+  } else if (modal === 'records') {
+    label = '对局记录';
+    body = `<h2>对局记录</h2><div class="records-list">${history.length ? history.map((entry) => `<p>${entry}</p>`).join('') : '<p class="dim">本局还没有记录</p>'}</div>`;
+  } else if (state.phase === 'settlement' && state.result) {
+    label = '本局结算';
+    className = 'result-card';
+    const result = state.result;
+    const title = result.winner == null ? '流 局' : `${result.winner === me ? '🎉' : '💦'} ${seatName(result.winner)}胡了！`;
+    const sub = result.winner == null
+      ? result.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
+      : `${result.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${result.tile ? tileText(result.tile) : ''}`;
+    const hands = ([me, opp] as Seat[])
+      .map((seat) => `<div class="rev"><b>${seatName(seat)}${flowerChip(seat)}</b>${state.hands[seat].filter((tile) => tile.id >= 0).map((tile) => tileFaceHTML(tile, 't-xs')).join('')}</div>`)
+      .join('');
+    const resultActions = online
+      ? snapshotIsHost()
+        ? `<button class="abtn hu" data-action="room-rematch" ${online.snapshot?.canRematch ? '' : 'disabled'}>再来一局</button><button class="ghost" data-action="open-room">房间信息</button>`
+        : '<p class="room-waiting">等待房主再来一局</p><button class="ghost" data-action="open-room">房间信息</button>'
+      : '<button class="abtn hu" data-action="local-next">下一局</button>';
+    body = `<h2>${title}</h2><p>${sub}</p>${hands}
+      <p class="tally">战绩 —— 你 <b>${state.tally.wins[me]}</b> 胜 · 对手 <b>${state.tally.wins[opp]}</b> 胜 · 流局 ${state.tally.draws}</p>
+      <div class="room-actions">${resultActions}</div>`;
   }
-  if (menuOpen) {
-    return `<div class="overlay"><div class="card" role="dialog" aria-modal="true" aria-labelledby="online-title">
-      <h2 id="online-title">联机对战</h2>
-      <p class="dim">邀请好友，输入房间号开始对局</p>
-      <button id="mkroom" class="abtn peng">创建房间</button>
-      <div class="joinrow">
-        <input id="joincode" maxlength="4" placeholder="房间号" aria-label="房间号" autocomplete="off">
-        <button id="doroom" class="abtn choose_flower">加入</button>
-      </div>
-      <button id="closemenu" class="ghost" style="margin-top:14px">取消，继续人机对战</button>
-    </div></div>`;
-  }
-  if (state.phase !== 'settlement' || !state.result) return '';
-  const r = state.result;
-  const title = r.winner == null ? '流 局' : `${r.winner === me ? '🎉' : '💦'} ${seatName(r.winner)}胡了！`;
-  const sub = r.winner == null
-    ? r.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
-    : `${r.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${r.tile ? tileText(r.tile) : ''}`;
-  const hands = ([me, opp] as Seat[])
-    .map((s) => `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].filter((t) => t.id >= 0).map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`)
-    .join('');
-  const waiting = state.ready[me] && !state.ready[opp];
-  const next = waiting
-    ? '<p class="tally">等待对手就绪…</p>'
-    : '<button id="next" class="abtn hu">下一局</button>';
-  return `<div class="overlay"><div class="card" role="dialog" aria-modal="true" aria-labelledby="result-title">
-    <h2 id="result-title">${title}</h2>
-    <p>${sub}</p>
-    ${hands}
-    <p class="tally">战绩 —— 你 <b>${state.tally.wins[me]}</b> 胜 · 对手 <b>${state.tally.wins[opp]}</b> 胜 · 流局 ${state.tally.draws}</p>
-    ${next}
+  return `<div class="overlay" data-modal-backdrop><div class="card ${className}" role="dialog" aria-modal="true" aria-label="${label}">
+    <button type="button" class="dialog-close" data-modal-close aria-label="关闭${label}">×</button>${body}
   </div></div>`;
 }
 
+function snapshotIsHost(): boolean {
+  return !!online?.snapshot && online.snapshot.you === online.snapshot.host;
+}
+
 function render(): void {
-  if (state.phase === 'settlement') riverOpen = false;
+  if (!online && state.phase === 'settlement' && modal == null && localResultRound !== state.round) {
+    modal = 'settlement';
+    localResultRound = state.round;
+  }
+  if (state.phase !== 'settlement') localResultRound = -1;
   const focusedId = document.activeElement?.id;
-  const previousCode = document.getElementById('joincode') as HTMLInputElement | null;
+  const previousCode = document.getElementById('room-code') as HTMLInputElement | null;
   const codeDraft = previousCode?.value;
   const codeCursor = previousCode ? [previousCode.selectionStart, previousCode.selectionEnd] : null;
-  yourActions = online && view ? view.yourActions : availableActions(state, me);
+  yourActions = online ? (view?.yourActions ?? []) : availableActions(state, me);
   discardMap = discardTargets(state.hands[me], yourActions);
   selection.sync(selectionContext(), legalDiscards());
   let abtns = '';
@@ -469,15 +597,13 @@ function render(): void {
   const app = document.getElementById('app')!;
   app.innerHTML = `
     <header class="topbar">
-      <span class="brand">双人麻将</span><span class="stat mode">${online ? '好友对战' : '人机练习'}</span><span class="stat">第 ${state.round} 局</span>
-      <span class="stat">庄 ${seatName(state.banker)}</span>
-      <span class="stat score">${state.tally.wins[me]}胜${state.tally.wins[opp]}负${state.tally.draws}流</span>
-      ${online ? `<span class="stat online">房间 <b>${online.code}</b></span>` : ''}
+      <span class="brand">双人麻将</span><span class="stat mode">${online ? '好友对战' : '人机练习'}</span><span class="stat">${online && !view ? '等待开局' : `第 ${state.round} 局`}</span>
+      ${online && !view ? '' : `<span class="stat">庄 ${seatName(state.banker)}</span>`}
+      ${online && !view ? '' : `<span class="stat score">${state.tally.wins[me]}胜${state.tally.wins[opp]}负${state.tally.draws}流</span>`}
       <span class="spacer"></span>
-      ${online
-        ? '<button id="leavebtn" class="ghost">退出房间</button>'
-        : '<button id="onlinebtn" class="ghost">联机</button>'}
-      <button id="riverbtn" class="ghost" aria-expanded="${riverOpen}">牌河</button>
+      <button id="roombtn" class="ghost">${online ? `房间 · ${online.code}` : '房间'}</button>
+      ${state.phase === 'settlement' && modal !== 'settlement' ? '<button id="resultbtn" class="ghost">本局结果</button>' : ''}
+      <button id="riverbtn" class="ghost" aria-expanded="${modal === 'river'}">牌河</button>
       <button id="logbtn" class="ghost">记录</button>
       <button id="soundbtn" class="ghost" aria-label="${isMuted() ? '开启音效' : '关闭音效'}">${isMuted() ? '静音' : '音效'}</button>
       <button id="newbtn" class="ghost" ${online ? 'disabled' : ''}>重开</button>
@@ -507,11 +633,10 @@ function render(): void {
           <span class="gang-progress">${state.melds[me].filter((m) => m.type === 'gang').length >= 2 ? '已达两杠 · 可按牌型胡牌' : `${state.melds[me].filter((m) => m.type === 'gang').length} / 2 杠 · 两杠起胡`}</span>
           <span class="melds">${meldsHTML(me)}</span>
         </div>
-        <div class="actionbar" role="group" aria-label="对局操作">${abtns || '<span class="action-note">' + (state.phase === 'act' && state.turn === me ? '选中后再次点击出牌' : '等待对手操作') + '</span>'}</div>
+        <div class="actionbar" role="group" aria-label="对局操作">${abtns || '<span class="action-note">' + (online && !view ? '等待房主开始对局' : state.phase === 'act' && state.turn === me ? '选中后再次点击出牌' : '等待对手操作') + '</span>'}</div>
         <div class="hand-area"><div class="hand${dealing ? ' dealing' : ''}" style="--hand-count:${Math.max(1, state.hands[me].length)}">${handHTML(me, dealing)}</div></div>
       </section>
     </main>
-    <aside id="logpanel" class="hidden">${history.map((h) => `<div>${h}</div>`).join('')}</aside>
     ${flashMsg ? `<div id="toast">${flashMsg}</div>` : ''}
     ${overlayHTML()}
   `;
@@ -521,27 +646,22 @@ function render(): void {
     setMuted(!isMuted());
     render();
   };
-  document.getElementById('logbtn')!.onclick = () => document.getElementById('logpanel')!.classList.toggle('hidden');
-  document.getElementById('riverbtn')!.onclick = () => { selection.clear(); riverOpen = !riverOpen; render(); document.getElementById('closeriver')?.focus(); };
-  document.getElementById('closeriver')?.addEventListener('click', () => { riverOpen = false; render(); document.getElementById('riverbtn')?.focus(); });
-  document.getElementById('onlinebtn')?.addEventListener('click', () => {
-    selection.reset();
-    riverOpen = false;
-    menuOpen = true;
-    render();
+  document.getElementById('roombtn')!.onclick = () => openModal('room');
+  document.getElementById('riverbtn')!.onclick = () => { selection.clear(); openModal('river'); };
+  document.getElementById('logbtn')!.onclick = () => openModal('records');
+  document.getElementById('resultbtn')?.addEventListener('click', () => openModal('settlement'));
+  document.querySelector('[data-modal-close]')?.addEventListener('click', closeModal);
+  document.querySelector('[data-modal-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeModal();
   });
-  document.getElementById('leavebtn')?.addEventListener('click', goLocal);
-  document.getElementById('closemenu')?.addEventListener('click', () => {
-    menuOpen = false;
-    render();
-    scheduleNext();
+  document.querySelector('[data-form="room-join"]')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    joinFromDialog();
   });
-  document.getElementById('mkroom')?.addEventListener('click', () => createRoom());
-  document.getElementById('doroom')?.addEventListener('click', () => {
-    const v = (document.getElementById('joincode') as HTMLInputElement).value.trim().toUpperCase();
-    if (v.length === 4) joinRoom(v);
+  app.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
+    button.disabled ||= !!online?.pendingControl;
+    button.onclick = () => handleModalAction(button.dataset.action ?? '');
   });
-  document.getElementById('next')?.addEventListener('click', () => doAction({ type: 'ready', seat: me }));
   app.querySelectorAll<HTMLButtonElement>('[data-idx]').forEach((b) => {
     const a = yourActions[Number(b.dataset.idx)];
     if (a) b.onclick = () => doAction(a);
@@ -557,16 +677,16 @@ function render(): void {
       }
     };
   });
-  const dialogOpen = menuOpen || riverOpen || state.phase === 'settlement';
-  const codeInput = document.getElementById('joincode') as HTMLInputElement | null;
+  const dialogOpen = modal != null;
+  const codeInput = document.getElementById('room-code') as HTMLInputElement | null;
   if (codeInput && codeDraft !== undefined) codeInput.value = codeDraft;
   app.querySelectorAll<HTMLElement>('.discard-side .river').forEach((el) => { el.scrollTop = el.scrollHeight; });
-  app.querySelectorAll<HTMLElement>('.topbar,.table,#logpanel').forEach((el) => { el.inert = dialogOpen; });
+  app.querySelectorAll<HTMLElement>('.topbar,.table').forEach((el) => { el.inert = dialogOpen; });
   if (dialogOpen) {
     const previous = focusedId ? document.getElementById(focusedId) : null;
-    const fallback = document.getElementById(riverOpen && !menuOpen ? 'closeriver' : menuOpen ? 'mkroom' : 'next');
+    const fallback = document.querySelector<HTMLElement>('[data-modal-close]');
     (previous?.closest('.card') ? previous : fallback)?.focus({ preventScroll: true });
-    if (focusedId === 'joincode' && codeInput && codeCursor) codeInput.setSelectionRange(codeCursor[0], codeCursor[1]);
+    if (focusedId === 'room-code' && codeInput && codeCursor) codeInput.setSelectionRange(codeCursor[0], codeCursor[1]);
   }
 }
 
@@ -586,12 +706,9 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key !== 'Escape') return;
-  selection.clear();
-  const returnToRiver = riverOpen;
-  riverOpen = false;
-  if (menuOpen) { menuOpen = false; scheduleNext(); }
-  render();
-  if (returnToRiver) document.getElementById('riverbtn')?.focus();
+  if (!modal) return;
+  event.preventDefault();
+  closeModal();
 });
 let resizeFrame = 0;
 window.addEventListener('resize', () => {
