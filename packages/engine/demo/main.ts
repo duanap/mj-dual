@@ -6,6 +6,7 @@ import type { Action, GameEvent, GameState, PlayerView, RNG, Seat, Tile } from '
 import { applyAction, availableActions, currentActors, newMatch, suggestAction } from '../src/index';
 import { backHTML, tileFaceHTML, tileText } from './tiles';
 import { isMuted, setMuted, sfx } from './audio';
+import { DiscardSelection } from './selection';
 
 // 浏览器 CSPRNG：crypto.getRandomValues + 拒绝采样（与生产随机源纪律一致）
 const rng: RNG = {
@@ -30,6 +31,10 @@ let lastRound = -1;
 let flashMsg = '';
 let menuOpen = false; // 联机菜单（暂停本地对局）
 let yourActions: Action[] = [];
+const selection = new DiscardSelection();
+let riverOpen = false;
+const selectionContext = (): string => `${online?.code ?? `local:${gen}`}:${state.round}:${state.seq}`;
+const legalDiscards = (): number[] => yourActions.flatMap((a) => a.type === 'discard' ? [a.tileId] : []);
 
 interface Online {
   socket: Socket;
@@ -49,6 +54,8 @@ const flowerChip = (s: Seat): string => {
 /* ---------------- 模式：本地 AI / 联机 ---------------- */
 
 function goLocal(): void {
+  selection.reset();
+  riverOpen = false;
   if (online) {
     online.socket.disconnect();
     online = null;
@@ -105,6 +112,7 @@ function onState(v: PlayerView): void {
   opp = (1 - v.you) as Seat;
   consumeEvents(v.events);
   state = viewToState(v);
+  if (state.phase === 'settlement') riverOpen = false;
   render();
 }
 
@@ -188,10 +196,25 @@ try {
 /* ---------------- 行为 ---------------- */
 
 function doAction(a: Action): void {
+  if (selection.locked) return;
+  selection.reset();
   if (online) {
-    online.socket.emit('action', a, (res: any) => {
-      if (res && res.ok === false) flash(res.message ?? '操作被拒绝');
+    if (!online.socket.connected) {
+      flash('连接恢复后再操作');
+      render();
+      return;
+    }
+    selection.lock();
+    const context = selectionContext();
+    online.socket.timeout(5000).emit('action', a, (err: Error | null, res: any) => {
+      if (err || res?.ok === false) {
+        if (selectionContext() !== context) return;
+        selection.reset();
+        flash(err ? '暂未收到操作确认，请等待同步后重试' : res.message ?? '操作被拒绝');
+        render();
+      }
     });
+    render();
     return;
   }
   applyLocal(a);
@@ -232,6 +255,8 @@ function scheduleNext(): void {
 function newGame(): void {
   if (online) return;
   gen++;
+  selection.reset();
+  riverOpen = false;
   state = newMatch(rng);
   history = [];
   lastDiscard = null;
@@ -298,20 +323,28 @@ function handHTML(seat: Seat, dealing: boolean): string {
     return hand
       .map((t, i) => {
         const delay = dealing ? ` style="animation-delay:${i * 28}ms"` : '';
-        return reveal && t.id > 0
+        return reveal && t.id >= 0
           ? tileFaceHTML(t, 't-sm')
           : `<span class="twrap"${delay}>${backHTML('t-sm')}</span>`;
       })
       .join('');
   }
   const canPlay = state.phase === 'act' && state.turn === me && yourActions.some((a) => a.type === 'discard');
-  return hand
+  const suitOrder = (t: Tile): number => t.suit === (state.flowers[me] ?? 'tong') ? 0 : 1;
+  const sorted = [...hand].sort((a, b) => {
+    if (a.id === state.drawnTile?.id) return 1;
+    if (b.id === state.drawnTile?.id) return -1;
+    return suitOrder(a) - suitOrder(b) || a.rank - b.rank || a.id - b.id;
+  });
+  return sorted
     .map((t, i) => {
-      const cls = 't-lg' + (state.drawnTile?.id === t.id ? ' drawn' : '');
+      const drawn = state.drawnTile?.id === t.id;
+      const selected = selection.id === t.id;
+      const cls = 't-lg' + (drawn ? ' drawn' : '') + (selected ? ' selected' : '');
       const delay = dealing ? ` style="animation-delay:${i * 35}ms"` : '';
-      return canPlay && t.id > 0
-        ? `<button class="tbtn"${delay} data-discard="${t.id}" title="打出">${tileFaceHTML(t, cls)}</button>`
-        : `<span class="twrap"${delay}>${tileFaceHTML(t, cls)}</span>`;
+      return canPlay && t.id >= 0
+        ? `<button class="tbtn${drawn ? ' drawn-slot' : ''}"${delay} data-discard="${t.id}" aria-label="${tileText(t)}，${selected ? '再次点击打出' : '点击选择'}" aria-pressed="${selected}" ${selection.locked ? 'disabled' : ''}>${tileFaceHTML(t, cls)}</button>`
+        : `<span class="twrap${drawn ? ' drawn-slot' : ''}"${delay}>${tileFaceHTML(t, cls)}</span>`;
     })
     .join('');
 }
@@ -327,11 +360,11 @@ function meldsHTML(seat: Seat): string {
     .join('');
 }
 
-function riverHTML(seat: Seat): string {
+function riverHTML(seat: Seat, full = false): string {
   const all = state.rivers[seat];
   // 手机横屏（矮视口）只保留最近 6 张，避免中央区溢出
   const compact = window.matchMedia('(orientation: landscape) and (max-height: 560px)').matches;
-  const r = compact ? all.slice(-6) : all;
+  const r = compact && !full ? all.slice(-6) : all;
   return r.map((t, i) => tileFaceHTML(t, 't-sm', i === r.length - 1 && all.length > 0 ? 'latest' : '')).join('');
 }
 
@@ -356,23 +389,35 @@ function actionLabel(a: Action, seat: Seat): string {
 function phaseHint(): string {
   switch (state.phase) {
     case 'choose_flower': return state.turn === me ? '请选择你的花色（定花）' : '对手正在定花…';
-    case 'act': return state.turn === me ? '轮到你 —— 点手牌出牌' : '对手思考中…';
+    case 'act': {
+      if (state.turn !== me) return '对手思考中…';
+      if (selection.locked) return '操作确认中…';
+      const tile = state.hands[me].find((t) => t.id === selection.id);
+      return tile ? `已选 ${tileText(tile)} · 再点一次打出` : '轮到你 · 点牌选择，再点打出';
+    }
     case 'respond': {
       const t = state.pending ? tileText(state.pending.tile) : '';
-      return state.turn === me ? `对手打出 ${t}，吃不住就点「过」` : `你打出 ${t}，对手响应中…`;
+      return state.turn === me ? `对手打出 ${t} · 请选择操作或「过」` : `你打出 ${t} · 对手响应中…`;
     }
     case 'settlement': return '本局结束';
   }
 }
 
 function overlayHTML(): string {
+  if (riverOpen && !menuOpen && state.phase !== 'settlement') {
+    return `<div class="overlay"><div class="card river-card" role="dialog" aria-modal="true" aria-labelledby="river-title">
+      <div class="dialog-head"><h2 id="river-title">完整牌河</h2><button id="closeriver" class="ghost" aria-label="关闭完整牌河">关闭</button></div>
+      <div class="river-history"><h3>对手 · ${state.rivers[opp].length} 张</h3><div class="river full">${riverHTML(opp, true)}</div>
+      <h3>你 · ${state.rivers[me].length} 张</h3><div class="river full">${riverHTML(me, true)}</div></div>
+    </div></div>`;
+  }
   if (menuOpen) {
-    return `<div class="overlay"><div class="card">
-      <h2>联机对战</h2>
-      <p class="dim">与另一名玩家同池对战（需要服务端在线）</p>
+    return `<div class="overlay"><div class="card" role="dialog" aria-modal="true" aria-labelledby="online-title">
+      <h2 id="online-title">联机对战</h2>
+      <p class="dim">邀请好友，输入房间号开始对局</p>
       <button id="mkroom" class="abtn peng">创建房间</button>
       <div class="joinrow">
-        <input id="joincode" maxlength="4" placeholder="房间号" autocomplete="off">
+        <input id="joincode" maxlength="4" placeholder="房间号" aria-label="房间号" autocomplete="off">
         <button id="doroom" class="abtn choose_flower">加入</button>
       </div>
       <button id="closemenu" class="ghost" style="margin-top:14px">取消，继续人机对战</button>
@@ -385,14 +430,14 @@ function overlayHTML(): string {
     ? r.reason === 'gang_no_replacement' ? '杠后无牌可补' : '牌墙已摸空'
     : `${r.kind === 'zimo' ? '自摸' : '点炮'}胡 · 胡牌张 ${r.tile ? tileText(r.tile) : ''}`;
   const hands = ([me, opp] as Seat[])
-    .map((s) => `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].filter((t) => t.id > 0).map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`)
+    .map((s) => `<div class="rev"><b>${seatName(s)}${flowerChip(s)}</b>${state.hands[s].filter((t) => t.id >= 0).map((t) => tileFaceHTML(t, 't-xs')).join('')}</div>`)
     .join('');
   const waiting = state.ready[me] && !state.ready[opp];
   const next = waiting
     ? '<p class="tally">等待对手就绪…</p>'
     : '<button id="next" class="abtn hu">下一局</button>';
-  return `<div class="overlay"><div class="card">
-    <h2>${title}</h2>
+  return `<div class="overlay"><div class="card" role="dialog" aria-modal="true" aria-labelledby="result-title">
+    <h2 id="result-title">${title}</h2>
     <p>${sub}</p>
     ${hands}
     <p class="tally">战绩 —— 你 <b>${state.tally.wins[me]}</b> 胜 · 对手 <b>${state.tally.wins[opp]}</b> 胜 · 流局 ${state.tally.draws}</p>
@@ -401,12 +446,15 @@ function overlayHTML(): string {
 }
 
 function render(): void {
+  if (state.phase === 'settlement') riverOpen = false;
+  const focusedId = document.activeElement?.id;
   yourActions = online && view ? view.yourActions : availableActions(state, me);
+  selection.sync(selectionContext(), legalDiscards());
   let abtns = '';
   if (state.phase !== 'settlement') {
     for (const a of yourActions) {
       if (a.type === 'discard') continue;
-      abtns += `<button class="abtn ${a.type}" data-idx="${yourActions.indexOf(a)}">${actionLabel(a, me)}</button>`;
+      abtns += `<button class="abtn ${a.type}" data-idx="${yourActions.indexOf(a)}" ${selection.locked ? 'disabled' : ''}>${actionLabel(a, me)}</button>`;
     }
   }
 
@@ -416,7 +464,7 @@ function render(): void {
   const app = document.getElementById('app')!;
   app.innerHTML = `
     <header class="topbar">
-      <span class="stat">第 ${state.round} 局</span>
+      <span class="brand">双人麻将</span><span class="stat mode">${online ? '好友对战' : '人机练习'}</span><span class="stat">第 ${state.round} 局</span>
       <span class="stat">庄 ${seatName(state.banker)}</span>
       <span class="stat score">${state.tally.wins[me]}胜${state.tally.wins[opp]}负${state.tally.draws}流</span>
       ${online ? `<span class="stat online">房间 <b>${online.code}</b></span>` : ''}
@@ -424,9 +472,10 @@ function render(): void {
       ${online
         ? '<button id="leavebtn" class="ghost">退出房间</button>'
         : '<button id="onlinebtn" class="ghost">联机</button>'}
-      <button id="logbtn" class="ghost" title="对局记录">☰</button>
-      <button id="soundbtn" class="ghost" title="音效">${isMuted() ? '🔇' : '🔊'}</button>
-      <button id="newbtn" class="ghost" title="新对局" ${online ? 'disabled' : ''}>↻</button>
+      <button id="riverbtn" class="ghost" aria-expanded="${riverOpen}">牌河</button>
+      <button id="logbtn" class="ghost">记录</button>
+      <button id="soundbtn" class="ghost" aria-label="${isMuted() ? '开启音效' : '关闭音效'}">${isMuted() ? '静音' : '音效'}</button>
+      <button id="newbtn" class="ghost" ${online ? 'disabled' : ''}>重开</button>
     </header>
     <main class="table">
       <section class="zone opp${currentActors(state).includes(opp) ? ' turn' : ''}">
@@ -437,23 +486,24 @@ function render(): void {
         <div class="backs${dealing ? ' dealing' : ''}">${handHTML(opp, dealing)}</div>
       </section>
       <section class="center">
-        <div class="tray" data-label="对手牌河"><div class="river">${riverHTML(opp)}</div></div>
+        <div class="tray" data-label="对手牌河 · ${state.rivers[opp].length} 张"><div class="river">${riverHTML(opp)}</div></div>
         <div class="mid">
           <div class="wall-disc"><b>${state.wall.length}</b><span>牌墙</span></div>
           <span class="hint">${phaseHint()}</span>
           ${lastDiscard ? tileFaceHTML(lastDiscard, 't-md', 'last') : ''}
         </div>
-        <div class="tray" data-label="你的牌河"><div class="river">${riverHTML(me)}</div></div>
+        <div class="tray" data-label="你的牌河 · ${state.rivers[me].length} 张"><div class="river">${riverHTML(me)}</div></div>
       </section>
       <section class="zone me${currentActors(state).includes(me) ? ' turn' : ''}">
         <div class="meta">
           <span class="plate"><b class="pdot"></b>你 ${flowerChip(me)}${state.banker === me ? '<em>庄</em>' : ''}</span>
+          <span class="gang-progress">${state.melds[me].filter((m) => m.type === 'gang').length >= 2 ? '已达两杠 · 可按牌型胡牌' : `${state.melds[me].filter((m) => m.type === 'gang').length} / 2 杠 · 两杠起胡`}</span>
           <span class="melds">${meldsHTML(me)}</span>
         </div>
-        <div class="hand${dealing ? ' dealing' : ''}">${handHTML(me, dealing)}</div>
+        <div class="hand-area"><div class="hand${dealing ? ' dealing' : ''}" style="--hand-count:${Math.max(1, state.hands[me].length)}">${handHTML(me, dealing)}</div></div>
+        <footer class="actionbar">${abtns || '<span class="action-note">' + (state.phase === 'act' && state.turn === me ? '选中后再次点击出牌' : '等待对手操作') + '</span>'}</footer>
       </section>
     </main>
-    <footer class="actionbar">${abtns}</footer>
     <aside id="logpanel" class="hidden">${history.map((h) => `<div>${h}</div>`).join('')}</aside>
     ${flashMsg ? `<div id="toast">${flashMsg}</div>` : ''}
     ${overlayHTML()}
@@ -465,7 +515,11 @@ function render(): void {
     render();
   };
   document.getElementById('logbtn')!.onclick = () => document.getElementById('logpanel')!.classList.toggle('hidden');
+  document.getElementById('riverbtn')!.onclick = () => { selection.clear(); riverOpen = !riverOpen; render(); document.getElementById('closeriver')?.focus(); };
+  document.getElementById('closeriver')?.addEventListener('click', () => { riverOpen = false; render(); document.getElementById('riverbtn')?.focus(); });
   document.getElementById('onlinebtn')?.addEventListener('click', () => {
+    selection.reset();
+    riverOpen = false;
     menuOpen = true;
     render();
   });
@@ -486,9 +540,50 @@ function render(): void {
     if (a) b.onclick = () => doAction(a);
   });
   app.querySelectorAll<HTMLButtonElement>('[data-discard]').forEach((b) => {
-    b.onclick = () => doAction({ type: 'discard', tileId: Number(b.dataset.discard) });
+    b.onclick = () => {
+      const id = Number(b.dataset.discard);
+      const discard = selection.choose(selectionContext(), id, legalDiscards());
+      if (discard !== null) doAction({ type: 'discard', tileId: discard });
+      else {
+        render();
+        app.querySelector<HTMLButtonElement>(`[data-discard="${id}"]`)?.focus({ preventScroll: true });
+      }
+    };
   });
+  const dialogOpen = menuOpen || riverOpen || state.phase === 'settlement';
+  app.querySelectorAll<HTMLElement>('.tray').forEach((el) => { el.scrollTop = el.scrollHeight; });
+  app.querySelectorAll<HTMLElement>('.topbar,.table,#logpanel').forEach((el) => { el.inert = dialogOpen; });
+  if (dialogOpen) {
+    const previous = focusedId ? document.getElementById(focusedId) : null;
+    const fallback = document.getElementById(riverOpen && !menuOpen ? 'closeriver' : menuOpen ? 'mkroom' : 'next');
+    (previous?.closest('.card') ? previous : fallback)?.focus({ preventScroll: true });
+  }
 }
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab') {
+    const dialog = document.querySelector('.card');
+    const controls = dialog?.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled])');
+    if (controls?.length) {
+      const first = controls[0]!;
+      const last = controls[controls.length - 1]!;
+      if (event.shiftKey && (document.activeElement === first || !dialog?.contains(document.activeElement))) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog?.contains(document.activeElement))) {
+        event.preventDefault(); first.focus();
+      }
+    }
+    return;
+  }
+  if (event.key !== 'Escape') return;
+  selection.clear();
+  const returnToRiver = riverOpen;
+  riverOpen = false;
+  if (menuOpen) { menuOpen = false; scheduleNext(); }
+  render();
+  if (returnToRiver) document.getElementById('riverbtn')?.focus();
+});
+window.matchMedia('(orientation: landscape) and (max-height: 560px)').addEventListener('change', () => render());
 
 render();
 scheduleNext();

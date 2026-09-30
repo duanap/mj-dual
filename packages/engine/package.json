@@ -12,6 +12,7 @@
     "test": "vitest run",
     "sim": "tsx src/sim.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:demo": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler demo/main.ts",
     "demo": "esbuild demo/main.ts --bundle --format=esm --outfile=demo/dist/main.js && node demo/server.mjs"
   },
   "devDependencies": {
