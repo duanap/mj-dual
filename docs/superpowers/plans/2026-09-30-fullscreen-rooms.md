@@ -38,6 +38,7 @@
 - `packages/engine/demo/effects.ts` — 按对局事件选择一次性视觉特效。
 - `packages/engine/demo/index.html` — 用户背景、全屏手机布局、弹窗和特效动画。
 - `packages/engine/demo/assets/background-fe186065.png` — 原始背景图片副本。
+- `packages/engine/package.json` — 本地试玩和生产构建共用的 demo bundle 命令。
 - `packages/server/src/index.ts` — 生产 HTTP 静态 MIME 类型及现有健康检查入口。
 - `README.md` — 房间操作、全屏、结算与本地启动说明。
 
@@ -142,6 +143,7 @@ git commit -m "feat: add authenticated room control events"
 - Modify: `packages/engine/demo/main.ts`
 - Create: `packages/engine/demo/room-ui.ts`
 - Create: `packages/engine/demo/assets/background-fe186065.png`
+- Modify: `packages/engine/package.json`
 - Modify: `packages/server/src/index.ts`
 - Modify: `packages/engine/demo/server.mjs`
 - Test: `packages/engine/test/room-ui.test.ts`
@@ -166,7 +168,7 @@ Expected: `renderRoomDialog` 不存在。
 
 - [ ] **Step 4: Render one accessible role-aware room modal**
 
-在 `room-ui.ts` 实现接口并渲染房间号、本人角色、双方在线状态、房间阶段、局数/战绩与有效操作。`main.ts` 删除 `menuOpen` 的旧联机弹窗判断，改用一个 ModalKind；接入 Task 2 快照和事件；保留房间号输入草稿/光标；房主创建后或玩家加入后打开房间弹窗；“开始游戏”成功后自动关闭。
+在 `room-ui.ts` 实现接口并渲染房间号、本人角色、双方在线状态、房间阶段、局数/战绩与有效操作。`main.ts` 删除 `menuOpen` 的旧联机弹窗判断，改用一个 ModalKind；接入 Task 2 快照和事件；保留房间号输入草稿/光标；房主创建后或玩家加入后打开房间弹窗；“开始游戏”成功后自动关闭。将带 SVG data URL loader 的 esbuild 命令拆为 `packages/engine` 的 `build:demo`，本地试玩和生产 server 共用同一前端构建。
 
 - [ ] **Step 5: Make every modal close safely**
 
@@ -176,12 +178,13 @@ Expected: `renderRoomDialog` 不存在。
 
 Run: `npm --workspace @mj/engine test -- test/room-ui.test.ts`  
 Run: `npm --workspace @mj/engine run typecheck:demo`  
+Run: `npm --workspace @mj/engine run build:demo`  
 Expected: 房主/玩家权限按钮正确；默认横屏、竖屏 CSS 旋转、弹窗 JSX/HTML 与 typecheck 正常。
 
 - [ ] **Step 7: Commit the full-screen room UI**
 
 ```bash
-git add packages/engine/demo/index.html packages/engine/demo/main.ts packages/engine/demo/room-ui.ts packages/engine/demo/assets/background-fe186065.png packages/server/src/index.ts packages/engine/demo/server.mjs packages/engine/test/room-ui.test.ts
+git add packages/engine/demo/index.html packages/engine/demo/main.ts packages/engine/demo/room-ui.ts packages/engine/demo/assets/background-fe186065.png packages/engine/package.json packages/server/src/index.ts packages/engine/demo/server.mjs packages/engine/test/room-ui.test.ts
 git commit -m "feat: add full-screen game and room modal"
 ```
 
