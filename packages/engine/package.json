@@ -13,7 +13,8 @@
     "sim": "tsx src/sim.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:demo": "tsc --noEmit --strict --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler demo/main.ts",
-    "demo": "esbuild demo/main.ts --bundle --format=esm --loader:.svg=dataurl --outfile=demo/dist/main.js && node demo/server.mjs"
+    "build:demo": "esbuild demo/main.ts --bundle --format=esm --loader:.svg=dataurl --outfile=demo/dist/main.js",
+    "demo": "npm run build:demo && node demo/server.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

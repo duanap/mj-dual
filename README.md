@@ -77,6 +77,7 @@ npm test                # 全 workspace 测试（引擎/UI交互 53 + 服务端 
 npm run typecheck --workspaces --if-present
 npm run typecheck:demo --workspace @mj/engine
 npm run sim             # 随机自对弈模拟 + 守恒断言
+npm run build:demo --workspace @mj/engine
 npm run demo            # 本地人机对战（8787）
 npm run server          # 联机服务端（8788）
 ```
